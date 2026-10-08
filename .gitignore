@@ -1,0 +1,7 @@
+models/
+output/
+**/*.pdf
+**/*.csv
+**/*.png
+**/*.jpg
+__pycache__

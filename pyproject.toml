@@ -1,0 +1,18 @@
+[project]
+name = "paddle-ocr"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "docx>=0.2.4",
+    "opencc-python-reimplemented>=0.1.7",
+    "paddleocr[doc-parser]>=3.7.0",
+    "paddlepaddle-gpu==3.3.1",
+]
+
+[[tool.uv.index]]
+name = "paddle"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu130/"
+explicit = true
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle" }
