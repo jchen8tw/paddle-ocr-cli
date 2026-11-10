@@ -64,8 +64,9 @@ def test_the_worker_env_override_replaces_the_default_location(tmp_path, monkeyp
 def test_the_main_projects_uv_environment_does_not_leak_into_the_worker(monkeypatch):
     monkeypatch.delenv("PDF_OCR_WORKER_ENV", raising=False)
     monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/some/main/.venv")
+    monkeypatch.setenv("VIRTUAL_ENV", "/some/main/.venv")  # what an outer `uv run` exports
     env = pdf_ocr.worker_environment()
-    assert "UV_PROJECT_ENVIRONMENT" not in env
+    assert "UV_PROJECT_ENVIRONMENT" not in env and "VIRTUAL_ENV" not in env
     assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
 
 

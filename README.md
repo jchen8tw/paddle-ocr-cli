@@ -38,7 +38,9 @@ If no CUDA GPU is found, the tool runs on the CPU, which works but is slow. (The
 `MiniCPM-OCR-1.0` for the default Reader or `PaddleOCR-VL-1.6` for `--reader paddle`. A missing folder is
 reported by name before anything is loaded.
 
-On a 12 GB GPU the default path (the Layout model and MiniCPM) uses about 4 GB.
+On a 12 GB GPU the default path (the Layout model and MiniCPM) is small: measured with `nvidia-smi`, about 0.9 GB
+for the main process and about 2.7 GB for the worker once the model is loaded (more while it reads a long table).
+`--reader paddle` holds about 8 GB.
 
 ## Usage
 
@@ -68,7 +70,7 @@ and in the Markdown, and the exit code is 1.
 | `--models-dir` | `./models` | folder containing `PP-DocLayoutV3/` and the Reader's folder (`MiniCPM-OCR-1.0/`, or `PaddleOCR-VL-1.6/` with `--reader paddle`) |
 | `--pages` | all | 1-based page selection, e.g. `1-3,7,10-` |
 | `--device` | `gpu:0` if available | Paddle device, e.g. `cpu` |
-| `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the output is the same as before MiniCPM was added |
+| `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added; the JSON only gains a `reader` field in `engine` and `settings` |
 | `--dpi` | 216 | page render resolution |
 | `--layout-threshold` | 0.2 | layout score threshold; lower finds more blocks but too low invents boxes |
 | `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables. With MiniCPM it is the limit for tables only (see below) |
@@ -214,7 +216,9 @@ The raw Reading is then cleaned in this order:
    SDK). The JSON counts the cuts in `postprocessing.repetition_cuts`.
 2. **OTSL to HTML.** MiniCPM writes tables in OTSL. They are converted with the same converter PaddleX uses.
 3. **Table line breaks.** MiniCPM writes an in-cell line break as a *real* newline (PaddleOCR-VL writes a
-   literal `\n`). Both become `<br>`, so the CSV keeps the line break inside the cell.
+   literal `\n`). Both become `<br>`, so the CSV keeps the line break inside the cell. This happens inside
+   the Reader, so `postprocessing.tables_with_line_breaks_fixed` (the count of the literal `\n` fix) stays 0
+   with MiniCPM.
 4. **Simplified to Traditional repair**, as for PaddleOCR-VL. It is document-level and runs after all
    pages, which is why it comes after the Reader and not inside it.
 

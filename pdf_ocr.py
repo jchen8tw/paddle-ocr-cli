@@ -274,7 +274,8 @@ def worker_env_problem() -> str | None:
 
 def worker_environment() -> dict:
     env = dict(os.environ)
-    env.pop("UV_PROJECT_ENVIRONMENT", None)  # that one belongs to the main project, not the worker's
+    for name in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
+        env.pop(name, None)  # these name the main project's environment (`uv run` sets VIRTUAL_ENV), not the worker's
     if os.environ.get("PDF_OCR_WORKER_ENV"):
         env["UV_PROJECT_ENVIRONMENT"] = os.environ["PDF_OCR_WORKER_ENV"]
     env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false",
