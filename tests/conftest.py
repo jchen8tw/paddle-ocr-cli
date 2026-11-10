@@ -10,6 +10,9 @@ The sample PDF is gitignored, so it comes from outside:
     PDF_OCR_WORKER_ENV=/path/to/worker-venv                     # worker environment (default: worker/.venv)
 
 The end-to-end tests run once per Reader; a Reader whose model folder or environment is missing is skipped.
+The Judge is on by default, so the worker environment, `playwright install chromium`, node and Noto Sans CJK are
+needed for every run that does not pass --no-judge (see the README). Set PLAYWRIGHT_BROWSERS_PATH if Chromium is
+not in the default place.
 """
 import importlib.util
 import json
@@ -71,7 +74,7 @@ def reader(request) -> str:
 
 @pytest.fixture(scope="session")
 def models_dir(reader) -> Path:
-    return _models_dir("PP-DocLayoutV3", READER_DIRS[reader])
+    return _models_dir("PP-DocLayoutV3", READER_DIRS[reader], "MiniCPM-OCR-Jev")
 
 
 @pytest.fixture(scope="session")
@@ -95,13 +98,23 @@ def run_cli(pdf: Path, out_dir: Path, models_dir: Path, pages: str, reader: str 
     )
 
 
+def run_and_keep_stderr(pdf, out, models_dir, pages, reader, *extra) -> Path:
+    done = run_cli(pdf, out, models_dir, pages, reader, *extra)
+    (out / "stderr.txt").write_text(done.stderr, encoding="utf-8")
+    assert done.returncode == 0, f"CLI run ({reader} {' '.join(extra)}) failed:\n{done.stderr[-2000:]}"
+    return out
+
+
 @pytest.fixture(scope="session")
 def cli_runs(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> list[Path]:
-    """Output folders of two identical runs of the CLI on the sample (shared by all e2e tests of a Reader)."""
-    outs = []
-    for i in (1, 2):
-        out = tmp_path_factory.mktemp(f"{reader}_run{i}")
-        done = run_cli(sample_pdf, out, models_dir, pages, reader)
-        assert done.returncode == 0, f"CLI run {i} ({reader}) failed:\n{done.stderr[-2000:]}"
-        outs.append(out)
-    return outs
+    """Output folders of two identical runs of the CLI on the sample, with the Judge on (its default); shared by
+    all e2e tests of a Reader. The run's stderr is kept as stderr.txt next to the outputs."""
+    return [run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_run{i}"), models_dir, pages, reader)
+            for i in (1, 2)]
+
+
+@pytest.fixture(scope="session")
+def cli_run_no_judge(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> Path:
+    """One run with --no-judge."""
+    return run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_nojudge"), models_dir, pages, reader,
+                               "--no-judge")

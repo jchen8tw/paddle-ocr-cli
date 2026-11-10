@@ -2,6 +2,7 @@
 
 All checks take their probes as arguments so they run here without any of those installed.
 """
+import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -67,22 +68,28 @@ def test_only_the_noto_sans_cjk_files_are_picked_from_fc_list():
         Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc"), Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")]
 
 
-def test_chromium_missing_gives_the_install_command(tmp_path):
-    msg = render_env.chromium_problem(lambda: tmp_path / "missing" / "chrome")
-    assert "playwright install chromium" in msg
+def render_result(ok=True, reason=None, detail=None):
+    return types.SimpleNamespace(case_id="smoke", ok=ok, render_image_path="/x.png" if ok else None,
+                                 reason=reason, detail=detail)
 
 
-def test_chromium_present_is_no_problem(tmp_path):
-    exe = tmp_path / "chrome"
-    exe.write_bytes(b"")
-    assert render_env.chromium_problem(lambda: exe) is None
+def test_a_working_renderer_is_no_problem(tmp_path):
+    seen = []
+    assert render_env.smoke_render_problem(lambda cands, work: seen.append(cands) or [render_result()]) is None
+    assert seen[0][0].category == "text" and Path(seen[0][0].image_path).is_file()  # the bundled example crop
 
 
-def test_a_playwright_that_cannot_start_is_a_chromium_problem():
-    def boom():
-        raise RuntimeError("driver missing")
+def test_a_renderer_that_cannot_run_names_the_install_command_and_the_cause():
+    def boom(cands, work):
+        raise RuntimeError("BrowserType.launch: Executable doesn't exist at /x/chrome")
 
-    assert "playwright install chromium" in render_env.chromium_problem(boom)
+    msg = render_env.smoke_render_problem(boom)
+    assert "playwright install chromium" in msg and "Executable doesn't exist" in msg
+
+
+def test_a_render_that_fails_reports_the_reason_and_still_names_chromium():
+    msg = render_env.smoke_render_problem(lambda cands, work: [render_result(False, "render_error", "render_failed")])
+    assert "render_error" in msg and "render_failed" in msg and "playwright install chromium" in msg
 
 
 # --- the fontconfig the renderer runs under ----------------------------------------------------------

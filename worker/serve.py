@@ -102,11 +102,11 @@ def main(argv=None) -> int:
         import render_env
 
         problems = render_env.setup_problems()
-        if not problems:
-            if problem := render_env.chromium_problem(render_env.playwright_chromium_path):
-                problems.append(problem)
         if problems:
             return fail("setup", "the Judge's renderer is not set up:\n  - " + "\n  - ".join(problems))
+        render_env.prepare_environment()  # the private fontconfig, before the first render
+        if problem := render_env.smoke_render_problem():  # Chromium, Playwright, node and the fonts, for real
+            return fail("setup", "the Judge's renderer is not set up:\n  - " + problem)
         import importlib.metadata as md
 
         versions.update(playwright=md.version("playwright"), pillow=md.version("pillow"))
@@ -131,7 +131,6 @@ def main(argv=None) -> int:
             from jev_model import JevJudge
             from judging import RenderedJudge
 
-            render_env.prepare_environment()
             model = JevJudge(args.models_dir / JUDGE_DIR)
             judge = RenderedJudge(model, render_env.render_with_official_renderer, on_forward_error=lambda e: model.free_cache())
             judge_name = JUDGE_DIR

@@ -31,7 +31,9 @@ def test_output_structure(cli_runs, sample_pdf, pages, reader):
     assert doc["settings"]["reader"] == reader
     assert doc["engine"]["layout_model"] == "PP-DocLayoutV3"
     assert doc["engine"]["reader"] == {"minicpm": "MiniCPM-OCR-1.0", "paddle": "PaddleOCR-VL-1.6"}[reader]
-    assert ("torch" in doc["engine"] and "transformers" in doc["engine"]) == (reader == "minicpm")
+    assert doc["engine"]["judge"] == "MiniCPM-OCR-Jev"
+    assert "torch" in doc["engine"] and "transformers" in doc["engine"]  # the worker runs the Judge for either Reader
+    assert doc["settings"]["judge"] is True and doc["settings"]["judge_threshold"] == 0.98
     assert {"tables_with_line_breaks_fixed", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []
@@ -70,3 +72,58 @@ def test_second_run_gives_identical_markdown_and_json(cli_runs, sample_pdf):
         doc.pop("elapsed_seconds")  # the only timing field
     assert md1 == md2
     assert doc1 == doc2
+
+
+JUDGE_KEYS = {"score", "verdict", "below_threshold"}
+UNJUDGED_LABELS = {"chart", "seal", "image", "header_image", "footer_image"}
+
+
+def test_with_the_judge_on_every_judged_block_has_a_score_a_verdict_and_a_flag(cli_runs, sample_pdf):
+    _, doc = load(cli_runs[0], sample_pdf)
+    judged = 0
+    for page in doc["pages"]:
+        for b in page["blocks"]:
+            if b["label"] in UNJUDGED_LABELS:
+                assert not JUDGE_KEYS & b.keys(), f"{b['label']} must not carry a Score"
+                continue
+            assert JUDGE_KEYS <= b.keys(), f"page {page['page']} {b['label']} was not judged"
+            assert b["verdict"] in {"scored", "precheck_reject", "render_error", "missing_original_image",
+                                    "encode_error", "forward_error"}
+            assert (b["score"] is not None) == (b["verdict"] == "scored")
+            assert b["score"] is None or 0.0 <= b["score"] <= 1.0
+            assert b["below_threshold"] == (b["score"] is None or b["score"] < 0.98)
+            judged += 1
+    assert judged > 0
+    assert doc["postprocessing"]["judge"]["blocks_judged"] == judged
+
+
+def test_stderr_reports_the_blocks_below_the_threshold_per_page_and_the_markdown_carries_no_scores(cli_runs, sample_pdf):
+    stderr = (cli_runs[0] / "stderr.txt").read_text(encoding="utf-8")
+    md, doc = load(cli_runs[0], sample_pdf)
+    page_lines = [ln for ln in stderr.splitlines() if ln.startswith("[") and "page" in ln]
+    assert len(page_lines) == len(doc["pages"])
+    assert all("judged below the threshold" in ln for ln in page_lines)
+    for word in ("score", "verdict", "below_threshold", "threshold"):
+        assert word not in md.lower()
+
+
+def test_no_judge_gives_no_scores_and_records_that_the_judge_was_off(cli_run_no_judge, sample_pdf, reader):
+    md, doc = load(cli_run_no_judge, sample_pdf)
+    assert doc["settings"]["judge"] is False and doc["settings"]["judge_threshold"] is None
+    assert doc["settings"]["reread_short_blocks"] is True  # the ink-based re-read runs instead
+    assert "judge" not in doc["engine"] and "judge" not in doc["postprocessing"]
+    assert doc["source"]["pages_failed"] == []
+    for page in doc["pages"]:
+        for b in page["blocks"]:
+            assert not JUDGE_KEYS & b.keys()
+    stderr = (cli_run_no_judge / "stderr.txt").read_text(encoding="utf-8")
+    assert "below the threshold" not in stderr
+
+
+def test_the_markdown_is_the_same_whether_or_not_the_judge_ran_unless_the_ink_reread_changed_a_block(
+        cli_runs, cli_run_no_judge, sample_pdf):
+    md_judged, doc_judged = load(cli_runs[0], sample_pdf)
+    md_plain, doc_plain = load(cli_run_no_judge, sample_pdf)
+    reread = sum(1 for p in doc_plain["pages"] for b in p["blocks"] if "content_before_reread" in b)
+    if not reread:
+        assert md_judged == md_plain

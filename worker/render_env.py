@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -56,7 +57,7 @@ def noto_sans_cjk_files(fc_list_output: str) -> list[Path]:
 
 def setup_problems(*, which: Callable[[str], str | None] = shutil.which,
                    fc_list: Callable[[], str] = default_fc_list, droid_font: Path = DROID_FONT) -> list[str]:
-    """Everything missing for the Judge's renderer (except Chromium, see chromium_problem), each with its fix."""
+    """Everything missing for the Judge's renderer (except Chromium, see smoke_render_problem), each with its fix."""
     problems = []
     if not which("node"):
         problems.append("`node` (Node.js) is not on PATH; the Judge's KaTeX precheck needs it "
@@ -77,23 +78,33 @@ def setup_problems(*, which: Callable[[str], str | None] = shutil.which,
     return problems
 
 
-def chromium_problem(chromium_path: Callable[[], Path]) -> str | None:
-    """None if Playwright's Chromium is installed. `chromium_path()` returns its executable path."""
+EXAMPLE_BLOCK = RENDER_DIR / "examples" / "01_text_putnam" / "block.png"
+
+
+def _gist(text: str, limit: int = 300) -> str:
+    """The telling line of a long error (a subprocess traceback): the last line that names an Error, else the start."""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    errors = [ln for ln in lines if "Error" in ln]
+    return (errors[-1] if errors else str(text).strip())[:limit]
+
+
+def smoke_render_problem(render=None) -> str | None:
+    """Render one tiny Reading with the real renderer: None if it works, else what to fix. This is what finds a
+    missing Chromium (and anything else wrong with Playwright, node or the fonts) before a run starts."""
+    from judging import Candidate
+
+    render = render or render_with_official_renderer
+    install = f"if Chromium is not installed, {INSTALL_CHROMIUM}"
+    work = tempfile.mkdtemp(prefix="pdf_ocr_smoke_")
     try:
-        exe = Path(chromium_path())
-        if exe.is_file():
-            return None
-        reason = f"not found at {exe}"
+        result = render([Candidate("smoke", str(EXAMPLE_BLOCK), "Hello, 世界", "text")], work)[0]
     except Exception as e:
-        reason = f"Playwright could not locate it ({type(e).__name__}: {e})"
-    return f"Chromium for the Judge's renderer is not installed ({reason}); {INSTALL_CHROMIUM}"
-
-
-def playwright_chromium_path() -> Path:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        return Path(p.chromium.executable_path)
+        return f"the Judge's renderer cannot run ({_gist(e)}); {install}"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if result.ok:
+        return None
+    return f"a test render failed ({result.reason}: {_gist(result.detail)}); {install}"
 
 
 def font_cache_dir() -> Path:
