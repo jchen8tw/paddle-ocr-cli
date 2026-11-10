@@ -41,6 +41,9 @@ WORKER_DIR = ROOT / "worker"  # second uv project: torch + transformers (docs/ad
 
 # Page furniture that is kept in the JSON but left out of the Markdown by default.
 # (PaddleOCR's own default also drops `footnote`; that is real content, so it is kept here.)
+# Measured on pages 38-58 of one document (see the README, "Tuning notes"): 0.5 is the highest value that still
+# changed a Reading for the better; higher values re-read more Blocks (83 % at 0.98) for no further gain.
+DEFAULT_JUDGE_THRESHOLD = 0.5
 DEFAULT_MD_IGNORE = ["header", "header_image", "footer", "footer_image", "number", "aside_text"]
 MAX_RENDER_PIXELS = 40_000_000  # guard against huge pages exhausting memory at high DPI
 
@@ -86,10 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not score blocks with the MiniCPM-OCR Jev Judge (needs the worker environment, Chromium, "
                         "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
                         "ink-based re-read of implausibly short blocks runs instead")
-    g.add_argument("--judge-threshold", type=float, default=0.98, metavar="FLOAT",
-                   help="blocks scoring below this are flagged (below_threshold) in the JSON and counted on stderr. "
-                        "0.98 is the Judge authors' uncalibrated default; correct readings typically score lower, "
-                        "see the README (default: %(default)s)")
+    g.add_argument("--judge-threshold", type=float, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
+                   help="blocks scoring below this are re-read (up to 10 Readings, the best one is kept) and, if "
+                        "still below it, flagged (below_threshold) in the JSON and counted on stderr. 0 turns the "
+                        "re-reading off and keeps the Scores. The Judge authors' own value, 0.98, flags and re-reads "
+                        "most Blocks for no gain on the measured document; see the README (default: %(default)s)")
     g.add_argument("--no-recover", action="store_true",
                    help="with --no-judge, do not re-read blocks whose text is implausibly short for the ink they "
                         "contain (with the Judge on, that re-read never runs)")

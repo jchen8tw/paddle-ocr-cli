@@ -13,7 +13,7 @@ def args(*argv):
 
 def test_the_judge_is_on_by_default_with_the_official_threshold():
     a = args()
-    assert a.no_judge is False and a.judge_threshold == 0.98
+    assert a.no_judge is False and a.judge_threshold == 0.5
     assert args("--no-judge").no_judge is True
     assert args("--judge-threshold", "0.9").judge_threshold == 0.9
 

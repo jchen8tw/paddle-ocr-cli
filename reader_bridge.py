@@ -324,7 +324,7 @@ class ReaderBridge:
     batch_sampler = types.SimpleNamespace(batch_size=1)  # only read when the pipeline uses queues
     strip = True
 
-    def __init__(self, client, tmp_dir: Path, *, to_html, judge: bool = False, judge_threshold: float = 0.98,
+    def __init__(self, client, tmp_dir: Path, *, to_html, judge: bool = False, judge_threshold: float = 0.5,
                  repair=None, ink_reread=None, doc_hash: str = ""):
         self.client, self.tmp_dir, self.to_html = client, Path(tmp_dir), to_html
         self.judge, self.threshold, self.repair, self.ink_reread = judge, judge_threshold, repair, ink_reread
