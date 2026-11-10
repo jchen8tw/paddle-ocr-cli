@@ -33,9 +33,9 @@ def read_page(bridge, items, page=0, **kw):
 
 
 def test_every_judged_block_gets_a_score_verdict_and_flag_keyed_by_page_and_bbox(tmp_path):
-    client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.9)})
+    client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.9)}, default_score=0.5)
     b = minicpm(client, tmp_path)
-    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4))], page=4) == ["words"]
+    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4))], page=4) == ["words"]  # re-reads scored lower
     out = b.outcomes[(4, (1, 2, 3, 4))]
     assert (out.score, out.verdict, out.below_threshold) == (0.9, "scored", True)
 
@@ -101,14 +101,14 @@ def test_without_a_judge_nothing_is_scored_and_the_worker_is_only_asked_to_read(
 
 
 def test_the_page_summary_counts_blocks_below_the_threshold_and_those_not_scored(tmp_path):
-    client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.5)})
+    client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.5)}, default_score=0.5)
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", (0, 0, 1, 1)), item("OCR:", "text", (0, 2, 1, 3))], page=2)
-    client.scores = {}
+    client.scores, client.default_score = {}, 0.99
     read_page(b, [item("OCR:", "text", (5, 5, 6, 6))], page=3)
-    assert b.page_summary(2) == {"judged": 2, "below_threshold": 2, "not_scored": 0}
-    assert b.page_summary(3) == {"judged": 1, "below_threshold": 0, "not_scored": 0}
-    assert b.page_summary(9) == {"judged": 0, "below_threshold": 0, "not_scored": 0}
+    assert b.page_summary(2) == {"judged": 2, "reread": 2, "below_threshold": 2, "not_scored": 0}
+    assert b.page_summary(3) == {"judged": 1, "reread": 0, "below_threshold": 0, "not_scored": 0}
+    assert b.page_summary(9) == {"judged": 0, "reread": 0, "below_threshold": 0, "not_scored": 0}
 
 
 # --- --reader paddle: PaddleOCR-VL reads, the worker only judges ---------------------------------------

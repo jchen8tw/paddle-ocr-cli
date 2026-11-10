@@ -31,6 +31,12 @@ _Avoid_: candidate, result, prediction
 Reading a Block again, differently, because its first Reading looks untrustworthy.
 _Avoid_: retry, re-OCR, recovery
 
+**Round**:
+One step of the re-read schedule: greedy at 1x (the first Reading), greedy at 1.25x, 4 samples at temperature 0.3,
+4 samples at temperature 0.7. A round runs for a Block only while its best Score is below the threshold, and a Reader
+skips the rounds it cannot do.
+_Avoid_: pass, attempt, stage
+
 **Judge**:
 The model (MiniCPM-OCR Jev) that rates a Reading against the Block's image. It does not transcribe.
 _Avoid_: verifier, scorer, Jev (as a role name)

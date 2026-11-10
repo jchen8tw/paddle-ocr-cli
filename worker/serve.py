@@ -12,6 +12,8 @@ real stdout (everything else, including library noise, is redirected to stderr):
     -> {"event": "error", "what": "worker_env"|"model"|"setup", "message": "..."}  then exit code 2
     <- {"id": 7, "op": "read", "image": "/tmp/run/crop.png", "prompt": "Text Recognition:", "max_new_tokens": 512}
     -> {"id": 7, "ok": true, "readings": [{"text": "...", "tokens": 13, "finish": "stop"|"length"}]}
+    <- {"id": 7, "op": "read", ..., "decode": {"mode": "sample", "temperature": 0.3, "top_k": 20, "top_p": 0.8,
+                                              "n": 4, "seed": 1234567}}   n Readings; the same seed gives the same texts
     <- {"id": 8, "op": "score", "items": [{"key": "p1/b3", "image": "/tmp/run/crop.png", "text": "...",
                                            "category": "text"|"formula"|"table"}]}
     -> {"id": 8, "ok": true, "results": [{"key": "p1/b3", "verdict": "scored", "score": 0.93, "detail": null}]}
@@ -53,7 +55,8 @@ def serve(reader, stdin, out, judge=None) -> None:
             if op == "read":
                 if reader is None:
                     raise RuntimeError("this worker was started without the Reader")
-                readings = reader.read(req["image"], req["prompt"], int(req["max_new_tokens"]))
+                extra = {"decode": req["decode"]} if req.get("decode") else {}  # greedy when absent
+                readings = reader.read(req["image"], req["prompt"], int(req["max_new_tokens"]), **extra)
                 _reply(out, {"id": req_id, "ok": True, "readings": readings})
             elif op == "score":
                 if judge is None:

@@ -88,11 +88,14 @@ class StickyScriptRepair:
         self.simplified = self.traditional = 0
         self.is_traditional = False
 
-    def apply(self, text: str, label: str) -> tuple[str, bool]:
-        """(text to judge, whether the document was already decided Traditional when this Reading came in)."""
+    def apply(self, text: str, label: str, *, survey: bool = True) -> tuple[str, bool]:
+        """(text to judge, whether the document was already decided Traditional when this Reading came in).
+
+        `survey=False` is for a re-read of a Block whose first Reading was already counted: the text is repaired
+        if the document is decided, but the running survey is left alone (it is the document's, not the re-reads')."""
         if self.rep is None or label in NO_REPAIR_LABELS:
             return text, self.is_traditional
-        if not self.is_traditional:
+        if survey and not self.is_traditional:
             simp, trad = self.rep.survey([text])
             self.simplified += simp
             self.traditional += trad
