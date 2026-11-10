@@ -132,13 +132,18 @@ def write_fontconfig(work_dir: Path, droid_dir: Path, noto_files: list[Path], ca
 
 
 def prepare_environment() -> None:
-    """Point the renderer's Chromium at the private fontconfig. Call once, before the first render."""
+    """Point the renderer's Chromium at the private fontconfig. Call once, before the first render.
+
+    The file and the links to Noto live in a folder of this process alone (removed at exit), so two runs, or a
+    restarted worker, can never find each other's half-written files; only fontconfig's cache is shared and kept."""
+    import atexit
+
     noto = noto_sans_cjk_files(default_fc_list())
     if not noto:  # setup_problems() reports this first; never render with the wrong font silently
         raise RuntimeError("Noto Sans CJK is not installed")
-    cache = font_cache_dir()
-    conf = write_fontconfig(cache.parent / "conf", DROID_DIR, noto, cache)
-    os.environ["FONTCONFIG_FILE"] = str(conf)
+    work = Path(tempfile.mkdtemp(prefix="pdf_ocr_fontconfig_"))
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
+    os.environ["FONTCONFIG_FILE"] = str(write_fontconfig(work, DROID_DIR, noto, font_cache_dir()))
 
 
 def render_with_official_renderer(candidates, work_dir):

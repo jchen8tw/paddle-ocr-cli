@@ -201,3 +201,36 @@ def test_with_a_judge_the_ink_reread_is_not_called(tmp_path):
 
     b = minicpm(FakeClient(), tmp_path, ink_reread=ink)
     read_page(b, [item("OCR:", "text")])
+
+
+# --- a worker that only judges must never cost a page that the Reader itself could read ------------------
+
+def test_with_paddle_a_worker_that_cannot_be_restarted_gives_forward_errors_not_a_failed_page(tmp_path):
+    class Dead(FakeClient):
+        def ensure_started(self):
+            raise WorkerError("the worker has crashed 4 times; not restarting it again")
+
+    b, _ = paddle(Dead(), tmp_path, {"OCR:": "words"})
+    assert read_page(b, [item("OCR:", "text")]) == ["words"]
+    out = b.outcomes[(0, (0, 0, 10, 10))]
+    assert (out.verdict, out.score, out.below_threshold) == ("forward_error", None, True)
+    assert "not restarting" in out.verdict_detail
+
+
+def test_with_paddle_a_failing_park_does_not_fail_the_page(tmp_path):
+    def broken_park():
+        raise WorkerError("no answer within 120s")
+
+    client = FakeClient(fail_score=WorkerError("the worker is not running"))
+    b, _ = paddle(client, tmp_path, {"OCR:": "words"}, before_read=broken_park)
+    assert read_page(b, [item("OCR:", "text")]) == ["words"]
+    assert b.outcomes[(0, (0, 0, 10, 10))].verdict == "forward_error"
+
+
+def test_with_minicpm_the_worker_is_the_reader_so_a_dead_worker_still_fails_the_page(tmp_path):
+    class Dead(FakeClient):
+        def ensure_started(self):
+            raise WorkerError("the worker has crashed 4 times; not restarting it again")
+
+    with pytest.raises(WorkerError, match="not restarting"):
+        read_page(minicpm(Dead(), tmp_path), [item("OCR:", "text")])

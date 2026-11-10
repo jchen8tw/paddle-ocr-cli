@@ -199,3 +199,22 @@ def test_with_a_judge_the_ink_reread_does_not_run():
 
     out = read_block(req("a"), FakeReader({"a": "x"}), FakeJudge(), settings(ink_reread=ink))
     assert out.text == "x"
+
+
+# --- what the Judge is shown is not always byte-for-byte the written text -----------------------------------
+# Measured with the real Judge on the SDK's formula example: the pipeline's rewrite of `\[ x \]` is `$$  x  $$`
+# (two spaces inside the delimiters, because the model already spaces them), and that scored 0.73 against 0.97 for
+# `$$ x $$`, which renders the same in Markdown.
+
+def test_the_judge_sees_display_formulas_with_single_spaces_inside_the_delimiters_the_written_text_is_untouched():
+    judge = FakeJudge()
+    out = read_block(req("f", "display_formula"), FakeReader({"f": " $$  x^2  $$ "}), judge, settings())
+    assert judge.calls[0][0].text == "$$ x^2 $$"
+    assert out.text == "$$  x^2  $$"
+
+
+def test_inline_formulas_get_the_same_treatment_but_text_and_tables_are_shown_as_written():
+    judge = FakeJudge()
+    read_blocks([req("a", "inline_formula"), req("b", "text"), req("c", "table")],
+                FakeReader({"a": " $  x  $", "b": "see  $  x  $  and  more", "c": "<td>a  b</td>"}), judge, settings())
+    assert [i.text for i in judge.calls[0]] == ["$ x $", "see  $  x  $  and  more", "<td>a  b</td>"]

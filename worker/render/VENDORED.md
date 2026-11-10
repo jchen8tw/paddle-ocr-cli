@@ -22,3 +22,10 @@ Pillow never renders anything.
 
 The font is not part of the SDK: `../fonts/DroidSansFallbackFull.ttf` comes from Debian's `fonts-droid-fallback`
 (see the amendment in ADR-0002).
+
+## Checksum of the font
+
+`../fonts/DroidSansFallbackFull.ttf`: 4,033,420 bytes, sha256
+`acb6440a713d880a13a21b468ba7cd43f5a2b2934972e51be791c880730777b8` (also in `../fonts/SHA256SUMS`; the file is
+identical in Debian's `fonts-droid-fallback` 6.0.1r16-1.1 and 8.1.0r7-1; Apache-2.0, `../fonts/NOTICE` and
+`../fonts/copyright`).

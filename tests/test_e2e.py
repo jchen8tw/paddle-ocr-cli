@@ -103,8 +103,12 @@ def test_stderr_reports_the_blocks_below_the_threshold_per_page_and_the_markdown
     page_lines = [ln for ln in stderr.splitlines() if ln.startswith("[") and "page" in ln]
     assert len(page_lines) == len(doc["pages"])
     assert all("judged below the threshold" in ln for ln in page_lines)
-    for word in ("score", "verdict", "below_threshold", "threshold"):
-        assert word not in md.lower()
+    for page in doc["pages"]:
+        for b in page["blocks"]:
+            if b.get("score") is not None:
+                assert str(b["score"]) not in md, "a Score leaked into the Markdown"
+    for key in ("below_threshold", "judged_before_script_decision", '"verdict"'):
+        assert key not in md
 
 
 def test_no_judge_gives_no_scores_and_records_that_the_judge_was_off(cli_run_no_judge, sample_pdf, reader):
@@ -124,6 +128,6 @@ def test_the_markdown_is_the_same_whether_or_not_the_judge_ran_unless_the_ink_re
         cli_runs, cli_run_no_judge, sample_pdf):
     md_judged, doc_judged = load(cli_runs[0], sample_pdf)
     md_plain, doc_plain = load(cli_run_no_judge, sample_pdf)
-    reread = sum(1 for p in doc_plain["pages"] for b in p["blocks"] if "content_before_reread" in b)
-    if not reread:
-        assert md_judged == md_plain
+    if any("content_before_reread" in b for p in doc_plain["pages"] for b in p["blocks"]):
+        pytest.skip("the ink-based re-read changed a block, so the two Markdowns legitimately differ")
+    assert md_judged == md_plain

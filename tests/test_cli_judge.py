@@ -176,3 +176,18 @@ def test_the_page_line_on_stderr_says_how_many_blocks_are_below_the_threshold():
     plain = pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary=None, recovered=2)
     assert plain == "[  1/2] page 1: 5 blocks, 1.0s, re-read 2 short block(s)"
     assert "below" in pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary={"judged": 5, "below_threshold": 0, "not_scored": 0}, recovered=0)
+
+
+# --- a run that ran out of GPU memory says what to do ---------------------------------------------------
+
+def test_a_page_error_or_a_verdict_detail_about_memory_gives_one_hint_naming_the_ways_out():
+    oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", below_threshold=True)
+    for errors, outcomes in (({3: "RuntimeError: CUDA out of memory. Tried to allocate"}, {}), ({}, {(0, (0, 0, 1, 1)): oom})):
+        hint = pdf_ocr.memory_hint(errors, outcomes)
+        assert "--no-judge" in hint and "--reader minicpm" in hint and "GPU" in hint
+
+
+def test_other_failures_give_no_memory_hint():
+    other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
+    assert pdf_ocr.memory_hint({1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
+    assert pdf_ocr.memory_hint({}, {}) is None

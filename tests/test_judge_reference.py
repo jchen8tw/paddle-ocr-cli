@@ -71,3 +71,21 @@ def test_unparsable_latex_is_rejected_by_the_precheck_and_the_rest_of_the_batch_
     verdicts = {r["key"]: r["verdict"] for r in results}
     assert verdicts == {"bad": "precheck_reject", "good": "scored", "gone": "missing_original_image"}
     assert all(r["score"] is None for r in results if r["verdict"] != "scored")
+
+
+def test_formulas_as_the_pipeline_writes_them_are_judged_like_the_authors_ground_truth(client):
+    """A model Reading `\\[ x \\]` is written as `$$  x  $$`; shown verbatim that scored 0.73 (measured), so the Judge
+    is shown `$$ x $$`. Both written forms, after the Judge's view, must score like the ground truth (0.968)."""
+    import minicpm_reader
+    from block_reader import judge_view
+
+    case = json.loads((EXAMPLES / "02_formula_putnam" / "case.json").read_text(encoding="utf-8"))
+    body = case["candidates"][0]["text"].strip().strip("$").strip()
+    block = str(EXAMPLES / "02_formula_putnam" / "block.png")
+    items = []
+    for key, raw, label in (("display", "\\[ " + body + " \\]", "display_formula"),
+                            ("inline", "\\(" + body + "\\)", "inline_formula")):
+        written = minicpm_reader.rewrite_latex_delimiters(raw, label)
+        items.append({"key": key, "image": block, "text": judge_view(written, "formula"), "category": "formula"})
+    for r in client.score(items):
+        assert r["verdict"] == "scored" and abs(r["score"] - case["observed_prob_yes"]["ground_truth"]) < 0.03, r

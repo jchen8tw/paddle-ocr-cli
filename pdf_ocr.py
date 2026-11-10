@@ -610,6 +610,16 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
+def memory_hint(errors: dict, outcomes: dict) -> str | None:
+    """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
+    texts = [*errors.values(), *(o.verdict_detail or "" for o in outcomes.values())]
+    if not any("out of memory" in t.lower() for t in texts):
+        return None
+    return ("hint: the GPU ran out of memory. The Judge and the Reader need to fit next to each other and to whatever "
+            "else uses the GPU; close other GPU programs, or run with --no-judge or --reader minicpm "
+            "(--reader paddle with the Judge is the tightest combination)")
+
+
 def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
               recovered: int) -> str:
     """One progress line on stderr."""
@@ -958,6 +968,8 @@ def _transcribe(args, stack) -> int:
         "pages": [pages[i] for i in sorted(pages)],
     }
     json_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if hint := memory_hint(errors, outcomes):
+        print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
     return 1 if errors else 0

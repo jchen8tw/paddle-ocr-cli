@@ -18,6 +18,7 @@ re-read of implausibly short Blocks runs instead.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -40,6 +41,17 @@ def judge_category(label: str) -> str | None:
     if label in FORMULA_LABELS:
         return "formula"
     return "table" if label == "table" else "text"
+
+
+def judge_view(text: str, category: str) -> str:
+    """The text the Judge is shown for a Reading. The same as the written text except for one whitespace detail
+    of formulas: runs of spaces just inside `$` / `$$` are made single. The pipeline rewrites the model's
+    `\\[ x \\]` into `$$  x  $$`; the real Judge rates that 0.73 where `$$ x $$` (which renders identically in
+    Markdown) gets 0.97, so it is shown the latter. The written text is not changed."""
+    if category != "formula":
+        return text
+    text = re.sub(r"(\$+)[ \t]{2,}", r"\1 ", text)
+    return re.sub(r"[ \t]{2,}(\$+)", r" \1", text)
 
 
 @dataclass
@@ -132,7 +144,7 @@ def read_blocks(requests: list[BlockRequest], reader: Reader, judge: Judge | Non
                 if repaired != text:
                     result.text, result.text_before_repair = repaired, text
             result.judged = True
-            items.append(JudgeItem(request.key, request.image, result.text, category))
+            items.append(JudgeItem(request.key, request.image, judge_view(result.text, category), category))
             slots.append(i)
         results.append(result)
 

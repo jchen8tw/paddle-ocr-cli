@@ -73,7 +73,8 @@ while Jev scores it. `--reader paddle` alone holds about 8 GB, and PaddleOCR-VL 
 (about 12.5 GB before the desktop). To make them fit, the run releases PaddleOCR-VL's cached memory after
 construction and after every page's read, and moves Jev's weights to the CPU while PaddleOCR-VL reads, and back
 before scoring (about a second per page). If your card is shared with other heavy processes and the Judge still runs
-out of memory, the run says so: use `--no-judge` or `--reader minicpm`.
+out of memory, the page or Block that hit it is recorded (a failed page, or the verdict `forward_error` with the
+reason) and the run ends with a line saying so and suggesting `--no-judge` or `--reader minicpm`.
 
 ## Usage
 
@@ -316,20 +317,25 @@ nothing is read again because of a low Score. (Re-reading low-Score Blocks is th
   brackets when there are some. The Markdown contains no Scores or markers.
 - **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
   of a merged table.
-- **Same text as written.** Before a Reading is judged it gets the same clean-up it gets for the output:
+- **Same text as written, give or take one space.** Before a Reading is judged it gets the same clean-up it gets for the output:
   the repetition cut, `\(...\)` and `\[...\]` rewritten to ` $ ... $ ` / ` $$ ... $$ ` (the pipeline does that
   anyway, afterwards; with the delimiters rewritten a Reading scored 0.9895 against 0.9951 for the raw `\(...\)`
   form on the SDK's text example, and both render as math), OTSL converted to HTML for tables, line breaks inside
   table cells turned into `<br>`, and the Simplified to Traditional repair (below). Raw OTSL scored about 0.0005 for
-  a correct table, which is why tables go to the Judge as HTML.
-- **One Chromium launch per page.** The Readings of a page are rendered in one batch (a launch costs about 0.8 s)
-  and scored one at a time (batching changes the Scores slightly). On the stand-in PDF the Judge added about 2.6 s per
+  a correct table, which is why tables go to the Judge as HTML. The one difference: the pipeline's rewrite turns the
+  model's `\[ x \]` into `$$  x  $$` (two spaces, since the model already spaces its formulas), and the real Judge
+  rated that 0.73 where `$$ x $$`, which renders the same in the Markdown, got 0.97 (SDK formula example). So the Judge
+  is shown a formula with single spaces inside `$`/`$$`; the written text keeps what the pipeline writes.
+- **One Chromium launch per batch.** The pipeline hands the Reader a page's Blocks in one call (one call per
+  pixel-budget group, which on the stand-in was always one per page: four pages, four score requests), and the
+  Readings of that call are rendered in one batch (a launch costs about 0.8 s) and scored one at a time (batching
+  changes the Scores slightly). On the stand-in PDF the Judge added about 2.6 s per
   page (the four pages took 24 s of page time without it and 34 s with it).
 
 **The repair is decided while reading, so the Judge sees repaired text.** The Simplified to Traditional repair is
 document-level: it needs the whole document to decide the document is Traditional (at least 30 Traditional-only
 characters and at most 15 % Simplified). The Judge works per Block, so the decision is made on the Readings seen so
-far, in reading order, and stays made: once the rule holds, every later Reading is repaired before it is judged.
+far, in the order the pipeline hands the Blocks over, and stays made: once the rule holds, every later Reading is repaired before it is judged.
 The Reading that completes the evidence is repaired too. Same input in the same order always gives the same
 decision. The document-level repair still runs afterwards on the original Readings, exactly as before, so the
 written text is unchanged by the Judge. Two consequences, both recorded in the JSON:

@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import inspect
 import itertools
+import sys
 import types
 from pathlib import Path
 
 import block_reader
 import minicpm_reader
 from block_reader import JudgeVerdict
+from worker_client import WorkerError
 
 COLLECT = "_paddleocr_vl_collect_page_vlm_entries_core"
 COLLECT_ARITY = 4  # (page_idx, blocks_for_img, imgs_in_doc_for_img, layout_prep_cfg); the hook passes them positionally
@@ -173,6 +175,16 @@ class WorkerJudge:
         return results
 
 
+class _DownJudge:
+    """The Judge while its worker cannot be started: every Block is reported as not scored."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def score(self, items):
+        raise self.error
+
+
 class _MiniCPMRead:
     def __init__(self, client, crops: CropFiles, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
@@ -194,7 +206,10 @@ class _PaddleRead:
 
     def read(self, requests):
         if self.before:
-            self.before()
+            try:
+                self.before()
+            except WorkerError as e:  # the Judge's worker, not the Reader: scoring will report it, the read goes on
+                print(f"warning: could not move the Judge off the GPU: {e}", file=sys.stderr)
         try:
             results = list(self.model.predict(
                 [{"image": r.image, "query": r.payload} for r in requests], **self.kwargs))
@@ -235,8 +250,14 @@ class ReaderBridge:
 
     def predict(self, inputs, **kwargs):
         inputs = list(inputs)
+        judge_down = None
         if self.judge or self.uses_worker_reader:
-            self.client.ensure_started()  # a worker that crashed on an earlier page is started again
+            try:
+                self.client.ensure_started()  # a worker that crashed on an earlier page is started again
+            except WorkerError as e:
+                if self.uses_worker_reader:
+                    raise  # the worker is the Reader: this page cannot be read
+                judge_down = e  # the worker only judges: the page is still read, its Blocks get forward_error
         crops = CropFiles(self.tmp_dir)
         try:
             requests = []
@@ -248,8 +269,8 @@ class ReaderBridge:
             settings = block_reader.ReadSettings(
                 self.threshold, self._clean, self.repair if self.judge else None,
                 (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None)
-            results = block_reader.read_blocks(requests, self._reader(kwargs, crops),
-                                               WorkerJudge(self.client, crops) if self.judge else None, settings)
+            judge = (_DownJudge(judge_down) if judge_down else WorkerJudge(self.client, crops)) if self.judge else None
+            results = block_reader.read_blocks(requests, self._reader(kwargs, crops), judge, settings)
         finally:
             crops.cleanup()
         for request, result in zip(requests, results):
