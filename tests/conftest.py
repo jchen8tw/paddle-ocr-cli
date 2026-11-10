@@ -7,6 +7,7 @@ The sample PDF is gitignored, so it comes from outside:
     PDF_OCR_MODELS_DIR=/path/to/models                          # default: ./models
     PDF_OCR_CER_BOUND=0.01                                      # overrides tests/baseline.json
     PDF_OCR_READERS=minicpm                                     # readers to run (default: minicpm,paddle)
+    PDF_OCR_REREAD_PAGES=4-5                                    # pages of the forced re-read runs (default: 4-5)
     PDF_OCR_WORKER_ENV=/path/to/worker-venv                     # worker environment (default: worker/.venv)
 
 The end-to-end tests run once per Reader; a Reader whose model folder or environment is missing is skipped.
@@ -118,3 +119,18 @@ def cli_run_no_judge(sample_pdf, models_dir, pages, reader, tmp_path_factory) ->
     """One run with --no-judge."""
     return run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_nojudge"), models_dir, pages, reader,
                                "--no-judge")
+
+
+REREAD_THRESHOLD = "0.9999"  # so high that nearly every Block is re-read
+
+
+@pytest.fixture(scope="session")
+def reread_pages() -> str:
+    return os.environ.get("PDF_OCR_REREAD_PAGES", "4-5")
+
+
+@pytest.fixture(scope="session")
+def reread_runs(sample_pdf, models_dir, reread_pages, reader, tmp_path_factory) -> list[Path]:
+    """Output folders of two identical runs with --judge-threshold 0.9999, which forces the re-reads."""
+    return [run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_reread{i}"), models_dir, reread_pages,
+                                reader, "--judge-threshold", REREAD_THRESHOLD) for i in (1, 2)]

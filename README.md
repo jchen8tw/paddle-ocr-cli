@@ -113,7 +113,7 @@ and in the Markdown, and the exit code is 1.
 | `--ocr-images` | off | also OCR any text inside figures |
 | `--no-merge-blocks` | | do not merge adjacent text blocks before OCR |
 | `--no-judge` | | do not score blocks (no Judge, no `playwright`, `node` or Noto Sans CJK needed). The ink-based re-read of short blocks runs instead |
-| `--judge-threshold FLOAT` | 0.98 | blocks whose Score is below this are flagged `below_threshold` in the JSON and counted per page on stderr (see "The Judge" for what to expect at 0.98) |
+| `--judge-threshold FLOAT` | 0.98 | blocks whose Score is below this are re-read (up to 10 Readings, see "Re-reading low-Score Blocks"); the ones still below it afterwards are flagged `below_threshold` in the JSON and counted per page on stderr (see "The Judge" for what to expect at 0.98) |
 | `--no-recover` | | with `--no-judge`, turn off the truncated-block re-read. With the Judge on that re-read never runs |
 | `--script {auto,off}` | `auto` | Simplified to Traditional repair; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |
@@ -132,10 +132,13 @@ The JSON has these top-level keys:
   and the device. Whenever the worker runs (MiniCPM, or the Judge) it also has the `torch`, `transformers`,
   `playwright` and `pillow` versions.
 - `settings`: every option that affects the output, including `reader`, `judge` and `judge_threshold` (null
-  with `--no-judge`).
+  with `--no-judge`). With the Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can
+  do each one: `supported`) and `max_readings_per_block`.
 - `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`; with the Judge, a
-  `judge` summary: blocks judged, blocks below the threshold, a count per verdict, and how many blocks were
-  judged before the document was known to be Traditional).
+  `judge` summary: `blocks_judged`, `blocks_reread`, `blocks_below_threshold` (still below the threshold after
+  re-reading), `reread_stop_reasons` (a count per `stop_reason`), `readings_beyond_the_first` (every extra
+  Reading made, duplicates included), a count per verdict, and how many blocks were judged before the document
+  was known to be Traditional).
 - `csv_tables`: which tables were exported and which were skipped.
 - `elapsed_seconds`.
 - `pages`.
@@ -146,6 +149,10 @@ Each page lists its `blocks`, each with these fields:
 - `in_markdown`
 - with the Judge, on every text, formula and table block: `score` (the Judge's 0-1 rating of the written text, or
   `null`), `verdict` and `below_threshold`; charts, seals and figures have none of these (see "The Judge")
+- on a block that was re-read (its first Reading scored below the threshold): `readings`, `stop_reason` and, if
+  the Reader could not do some rounds, `skipped_rounds`. `content`, `score`, `verdict` and `below_threshold`
+  are then those of the winning Reading. A block that passed on its first Reading has none of the three (see
+  "Re-reading low-Score Blocks")
 
 A page also keeps its unfiltered `layout_detections` with scores. When a clean-up step changes a block,
 the original text is kept next to it (`content_raw` for the script repair, `content_before_reread` for
@@ -290,8 +297,8 @@ model load).
 
 The Judge is MiniCPM-OCR Jev. It does not read; it looks at the Block's image and at an image of the Reading
 rendered with Chromium and KaTeX, and answers how likely the Reading is to be correct. That is the **Score**, from 0
-to 1. It is on by default and works with either Reader. This version only scores: every Block is read once, and
-nothing is read again because of a low Score. (Re-reading low-Score Blocks is the next step in the plan.)
+to 1. It is on by default and works with either Reader. A Block whose Score is below `--judge-threshold` is read
+again, up to nine more times, and the best Reading is kept (next section).
 
 - **What is judged.** Text, titles, footnotes, references (category `text`), inline and display formulas
   (`formula`) and tables (`table`). Charts, seals and figures are never judged (the Judge was not trained on
@@ -312,9 +319,9 @@ nothing is read again because of a low Score. (Re-reading low-Score Blocks is th
   are `null` here, and a failed Block is flagged rather than given a fake low Score. `verdict_detail` carries the
   reason. A failure on one Block never stops the run: the Reading is kept and the failure recorded. A page whose
   Judge call fails entirely gets `forward_error` on all its judged Blocks.
-- **On stderr**, each page's line says how many of its judged Blocks are below the threshold, e.g.
-  `[  2/21] page 4: 13 blocks, 9.9s, 13 of 13 judged below the threshold`, with the number not scored in
-  brackets when there are some. The Markdown contains no Scores or markers.
+- **On stderr**, each page's line says how many of its judged Blocks are below the threshold (after re-reading)
+  and how many were re-read, e.g. `[  2/21] page 4: 13 blocks, 35.4s, 11 of 13 judged below the threshold, 13 re-read`,
+  with the number not scored in brackets when there are some. The Markdown contains no Scores or markers.
 - **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
   of a merged table.
 - **Same text as written, give or take one space.** Before a Reading is judged it gets the same clean-up it gets for the output:
@@ -347,6 +354,72 @@ written text is unchanged by the Judge. Two consequences, both recorded in the J
   decision came early and the full survey disagrees), the block has `judged_text`, the text that was actually
   scored, next to `content`, the text that was written.
 
+### Re-reading low-Score Blocks
+
+A Block whose Score is below `--judge-threshold` is **re-read**, and the Reading with the highest Score is kept. The
+schedule is fixed; each step runs only while the best Score so far is below the threshold:
+
+| round | how the Block is read | Readings |
+|---|---|---|
+| 1 | greedy, the Block's own crop (the normal first Reading) | 1 |
+| 2 | greedy, the crop resampled to 1.25x | 1 |
+| 3 | sampled, temperature 0.3 (top-k 20, top-p 0.8), seeded | 4 |
+| 4 | sampled, temperature 0.7 (top-k 20, top-p 0.8), seeded | 4 |
+
+- **At most 10 Readings per Block**, duplicates included. A text that has been read before is **scored only once**
+  (MiniCPM's sampled Readings are often identical, and so is the 1.25x one for most Blocks).
+- **The highest `scored` Reading wins**, not the latest; a tie goes to the earliest. Readings with another verdict
+  (`precheck_reject`, `render_error`, ...) never win. If none was scored the first Reading is kept.
+- **Every Reading is cleaned, repaired and judged exactly like the first** (same clean-up, the same sticky
+  Simplified to Traditional repair, the same formula spacing for the Judge). A re-read does not change the repair
+  decision: only the first Reading of a Block counts towards it. The Judge always compares with the Block's own
+  crop, whatever scale the Reading was made from.
+- **In the JSON**, a re-read Block has `readings`, one entry per *distinct* text: `content` (the text as it was
+  judged), `score`, `verdict`, and how it was produced: `round`, `decode` (`greedy` or `temperature`), `temperature`
+  and `scale`; `duplicates` counts the later Readings that gave the same text. `stop_reason` says why the re-reading
+  ended: `passed` (a Reading reached the threshold), `exhausted` (all rounds done, none did), `no_scored` (all
+  rounds done and no Reading could be scored; the first Reading is kept), `judge_error` (the Judge failed on a
+  Reading, or on the whole batch, part-way: the best Reading so far is kept). If the Judge fails on the *first*
+  Reading nothing is re-read (there is no Score to improve on) and the Block just has `verdict: forward_error`.
+  A fifth value, `reader_error`, is not in the schedule's spec: if the Reader fails on a re-read round (for example
+  the GPU runs out of memory on a 4-sample table) the Block keeps its best Reading so far and the page is not
+  lost; `stop_detail` has the message. A Block that passed on its first Reading has none of these fields and cost
+  no extra Reading.
+- **Seeds are deterministic.** The seed of a round is a hash (blake2b, not Python's `hash()`) of the document's
+  sha256, the page, the Block's index on its page and the round, so it is the same in every process, and a Block's
+  seed does not depend on which other Blocks are on the page. The worker seeds torch immediately before the one
+  `generate` call that draws the 4 samples. Two runs of the same PDF on the same machine gave identical JSON, re-reads
+  included (`tests/test_e2e_reread.py`). As with Scores, this is not promised across GPUs or library versions.
+- **What each Reader can do.** MiniCPM-OCR-1.0 does all four rounds. The local PaddleOCR-VL ignores temperature and
+  top_p (PaddleX says so: "not supported by the local model"), so it is greedy and cannot honestly sample: with
+  `--reader paddle` only round 2 (the 1.25x input) is run, rounds 3 and 4 are skipped and listed in the Block's
+  `skipped_rounds` (and flagged `supported: false` in `settings.reread_schedule`) instead of being faked with
+  repeats. PaddleOCR-VL resizes every crop to its own pixel budget, so round 2 often gives the same text again.
+- **Round 2 is a resampled crop, not a page re-render.** "A 1.25x render" is implemented as the pipeline's own
+  crop of the Block enlarged by 1.25 (Lanczos), as the MiniCPM SDK's own scale round does. A page re-render would
+  give new pixels, but it cannot reproduce what the pipeline feeds the Reader for merged Blocks, formulas (margins
+  cropped) and tables (figure placeholders painted in). The page-render variant was not measured.
+- **Batched per page.** Round by round, only the Blocks still below the threshold are read, and each round is one
+  batch of Reader requests and **one** Judge call (one Chromium launch) for the call's new Readings, not one per
+  Block. The pipeline hands the Reader one call per pixel-budget group of a page, so this is per call.
+  A sampled round costs one worker request per Block (4 samples decoded together, with only the last position's
+  logits computed at prefill, which keeps a 4-sample table read inside the card's memory next to the Judge).
+- **Cost, measured on the stand-in PDF** (a digital-born Traditional Chinese proposal, *not* the sample; pages 4-8,
+  61 judged Blocks, MiniCPM Reader, RTX 4070 Ti): at the default 0.98, 59 of the 61 Blocks were re-read and none of
+  them reached 0.98 (`exhausted`); the 5 pages took 179 s against 58 s when nothing is re-read (`--judge-threshold 0`),
+  about 2 s more per re-read Block. At 0.9999 it was the same: 61 re-read, 184 s. Re-reading helped little there:
+  the 549 extra Readings made at 0.9999 contained only 12 distinct new texts (4 from the 1.25x round, 5 from the 0.3
+  samples, 3 from the 0.7 samples) spread over 9 Blocks; the Score went up for 5 Blocks (mean gain over all re-read
+  Blocks 0.005, largest 0.21) and the written text changed for 5.
+  With the paddle Reader on pages 4-5 (24 Blocks) round 2 gave the same text for all 24. These numbers say the
+  schedule, as specified, spends most of its time on duplicates; the threshold calibration (a later ticket) decides how
+  often it runs at all.
+- **GPU memory.** MiniCPM + Jev + the Layout model peaked at 10.6 GB of the card's 12.3 GB (`nvidia-smi`, whole
+  card, about 1 GB of it other desktop processes) during these re-read runs, whose largest table Reading was a few
+  thousand tokens. The 4-sample rounds need the worker's last-position-only logits (`worker/minicpm_model.py`); without
+  it a 4-sample table Reading ran out of memory in the spike. A table that does run out of memory in a re-read round
+  ends that Block with `reader_error` and keeps its best Reading.
+
 **Scores are not bit-for-bit reproducible across machines**, and the authors say thresholds must be calibrated on
 your own data. On one machine and one GPU the same PDF gives identical Scores (the end-to-end test runs it twice
 and compares the JSON).
@@ -377,8 +450,10 @@ loaded for `--reader minicpm`). Then it replaces the pipeline's per-block recogn
 sends each crop to the worker as a PNG file in a temporary folder and reads the answer back as one line of
 JSON. The bridge hands a page's Blocks to `block_reader.py`, "read a Block": a plain module (no GPU, no paddle)
 that takes the Blocks, a Reader and a Judge, cleans and repairs each Reading, has the page judged in one batch,
-and returns the final text with its Score, verdict and flag. The worker has two jobs over the same protocol: `read`
-(MiniCPM) and `score` (render and judge a batch of Readings). With `--reader paddle` the bridge calls
+re-reads the Blocks below the threshold round by round (the schedule above), and returns the final text with its
+Score, verdict and flag. A Reader tells it which rounds it supports. The worker has two jobs over the same
+protocol: `read` (MiniCPM; greedy, or `decode: {mode: sample, temperature, top_k, top_p, n, seed}` for `n` seeded
+samples) and `score` (render and judge a batch of Readings). With `--reader paddle` the bridge calls
 PaddleOCR-VL's own model as the Reader and the worker only judges, so the worker loads no MiniCPM. The worker is a long-lived process: the model is loaded once, and the main command stops it at the
 end of the run, whatever happens. The code is in `reader_bridge.py` (the hook), `worker_client.py` (the
 process and protocol) and `worker/` (the torch side).
@@ -425,7 +500,10 @@ PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf uv run pytest          # also run the CLI
 ```
 
 The fast tests need neither a GPU nor models: "read a Block" with a fake Reader and a fake Judge (repair happens
-before judging, unjudged labels are skipped, failure verdicts, `--no-judge` and the ink re-read), the sticky
+before judging, unjudged labels are skipped, failure verdicts, `--no-judge` and the ink re-read; and the re-read
+schedule in `tests/test_reread.py`: stop at the first Reading that passes, the order of the rounds and the 10-Reading
+cap, the highest Score winning, unscorable verdicts never winning, duplicates scored once, a Judge failure part-way,
+unsupported rounds, seeds), the re-read rounds through the bridges (`tests/test_reread_bridge.py`), the sticky
 repair, the Judge's verdicts with a fake renderer and model, the renderer's setup checks and fontconfig, the
 bridges, the JSON fields, the prompt and token limit of each block label, the
 clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
@@ -445,6 +523,12 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   the threshold per page, that the Markdown has no Scores, that `--no-judge` gives no Scores and records
   `judge: false`, that the character error rate against the text layer stays at or below the bound in
   `tests/baseline.json`, and that both runs give identical Markdown and JSON, Scores included.
+- `tests/test_e2e_reread.py` runs the CLI twice with `--judge-threshold 0.9999`, which forces Blocks through the
+  whole schedule, on `PDF_OCR_REREAD_PAGES` (default `4-5`), for each Reader. It checks that the two runs give
+  identical JSON and Markdown, re-reads included, that every re-read Block has its `readings`, a `stop_reason`, the
+  winner's `content`/`score` (the highest `scored` Reading), at most 10 Readings, that Blocks that were not re-read
+  have none of these, that `postprocessing` and the stderr lines count the re-read Blocks, and for `--reader paddle`
+  that rounds 3 and 4 are recorded as skipped.
 - `tests/test_judge_reference.py` needs no sample PDF: it starts the real worker, scores the SDK's three
   reference examples and compares with the Scores the authors observed (within 0.015), and checks that unparsable
   LaTeX and a missing crop get `precheck_reject` and `missing_original_image` while the rest of the batch is scored.
