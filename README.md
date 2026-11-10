@@ -1,14 +1,20 @@
-# pdf_ocr: PDF to Markdown, JSON and CSV with PaddleOCR-VL
+# pdf_ocr: PDF to Markdown, JSON and CSV with MiniCPM-OCR or PaddleOCR-VL
 
 `pdf_ocr.py` converts a PDF into Markdown, a detailed JSON file and one CSV per table. It uses only
 the local models in `models/`:
 
 | Model | Role |
 |---|---|
-| `models/PP-DocLayoutV3` | finds the layout blocks on each page (text, titles, tables, figures, …) and their reading order |
-| `models/PaddleOCR-VL-1.6` | reads each block: text, tables as HTML, formulas as LaTeX, and charts or seals if you ask |
+| `models/PP-DocLayoutV3` | the Layout model: finds the blocks on each page (text, titles, tables, figures, …) and their reading order |
+| `models/MiniCPM-OCR-1.0` | the default Reader: reads each block, with tables as HTML, formulas as LaTeX, and charts or seals if you ask |
+| `models/PaddleOCR-VL-1.6` | the other Reader, chosen with `--reader paddle` |
 
 It downloads nothing, and the model-hoster connectivity check is switched off.
+
+It is still one command. MiniCPM needs torch and transformers, which cannot share a virtual environment
+with paddlepaddle ([ADR-0001](docs/adr/0001-torch-models-in-a-separate-venv.md)). So the torch part lives in
+a second uv project, `worker/`, which the main command starts as a background process for the length of
+the run. You never start it yourself.
 
 ## Setup
 
@@ -17,10 +23,24 @@ from the CUDA 13.0 Paddle index. It also pulls in `paddleocr[doc-parser]` and `o
 which the Simplified to Traditional repair needs.
 
 ```bash
-uv sync
+uv sync                      # the main environment: the Layout model, PaddleOCR and the paddle Reader
+uv sync --project worker     # the worker environment: torch + transformers for MiniCPM (about 5.6 GB, CUDA 13.2 wheels)
 ```
 
-If no CUDA GPU is found, the tool runs on the CPU, which works but is slow.
+The worker environment is created in `worker/.venv`. It is needed only for the default `--reader minicpm`;
+with `--reader paddle` you can skip it. If it is missing, the tool stops at once and tells you to run the
+second command. The torch wheel from PyPI is built for CUDA 13.2, so the GPU driver must support it. The
+two environments are separate processes, so their CUDA libraries never meet.
+
+If no CUDA GPU is found, the tool runs on the CPU, which works but is slow. (The MiniCPM worker needs a CUDA GPU.)
+
+`--models-dir` has to hold only the folders that your options use: `PP-DocLayoutV3` always, plus
+`MiniCPM-OCR-1.0` for the default Reader or `PaddleOCR-VL-1.6` for `--reader paddle`. A missing folder is
+reported by name before anything is loaded.
+
+On a 12 GB GPU the default path (the Layout model and MiniCPM) is small: measured with `nvidia-smi`, about 0.9 GB
+for the main process and about 2.7 GB for the worker once the model is loaded (more while it reads a long table).
+`--reader paddle` holds about 8 GB.
 
 ## Usage
 
@@ -47,12 +67,13 @@ and in the Markdown, and the exit code is 1.
 | Option | Default | What it does |
 |---|---|---|
 | `-o, --output-dir` | `output/<stem>` | where to write the results |
-| `--models-dir` | `./models` | folder containing `PP-DocLayoutV3/` and `PaddleOCR-VL-1.6/` |
+| `--models-dir` | `./models` | folder containing `PP-DocLayoutV3/` and the Reader's folder (`MiniCPM-OCR-1.0/`, or `PaddleOCR-VL-1.6/` with `--reader paddle`) |
 | `--pages` | all | 1-based page selection, e.g. `1-3,7,10-` |
 | `--device` | `gpu:0` if available | Paddle device, e.g. `cpu` |
+| `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added; the JSON only gains a `reader` field in `engine` and `settings` |
 | `--dpi` | 216 | page render resolution |
 | `--layout-threshold` | 0.2 | layout score threshold; lower finds more blocks but too low invents boxes |
-| `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables |
+| `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables. With MiniCPM it is the limit for tables only (see below) |
 | `--charts` | off | turn charts into data tables (see Caveats) |
 | `--seals` | off | read the text on seals and stamps |
 | `--ocr-images` | off | also OCR any text inside figures |
@@ -71,9 +92,10 @@ and in the Markdown, and the exit code is 1.
 
 The JSON has these top-level keys:
 - `source`: file name, sha256, page count, pages processed and pages that failed.
-- `engine`: models, library versions and device.
-- `settings`: every option that affects the output.
-- `postprocessing`: what the clean-up steps changed.
+- `engine`: the Layout model and the Reader (`layout_model`, `reader`), the library versions and the device.
+  With MiniCPM it also has the `torch` and `transformers` versions of the worker.
+- `settings`: every option that affects the output, including `reader`.
+- `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`).
 - `csv_tables`: which tables were exported and which were skipped.
 - `elapsed_seconds`.
 - `pages`.
@@ -129,6 +151,9 @@ continuation page.
 
 ## What was done for accuracy
 
+**The numbers and the steps in this section were measured with PaddleOCR-VL-1.6 (`--reader paddle`).**
+The MiniCPM Reader is described after them.
+
 The goal was the highest precision possible with these two models. Every default below was chosen by
 scoring the output against the text layer of a 21-page Traditional Chinese insurance policy. The PDF's
 own characters were assigned to layout blocks by position, so reading order does not affect the score.
@@ -168,10 +193,82 @@ Each change and the reason for it:
 
 The output is deterministic: running the same PDF twice gives identical Markdown and JSON content.
 
+### The MiniCPM-OCR-1.0 Reader
+
+MiniCPM-OCR-1.0 is the default Reader. The Layout model, block merging, reading order, cross-page table
+merging and the Markdown, JSON and CSV outputs are the same for both Readers, because the PaddleOCR
+pipeline still does all of that. It hands each cropped block to the worker instead of to PaddleOCR-VL
+(see "How the worker is wired in" below). The worker reads one block at a time:
+
+- It loads the model as a native transformers image-text-to-text model (no remote code) in bf16.
+- The prompt depends on the block label: `Text Recognition:` for text-like blocks and inline formulas,
+  `Table Recognition:`, `Formula Recognition:` for display formulas, `Chart to Table:` and
+  `Seal Recognition:`. The image comes before the text, and thinking is off.
+- Decoding is greedy with `no_repeat_ngram_size=100`.
+- The token limit depends on the block: 4096 for text, 512 for titles, headers and footers, 2048 for formulas
+  and references, 1024 for footnotes, 256 for seals and page numbers, 4096 for charts. For tables it is
+  `--max-new-tokens`. A block that hits its limit cannot run away.
+- Charts and seals are still opt-in (`--charts`, `--seals`).
+
+The raw Reading is then cleaned in this order:
+
+1. **Repetition cut.** A Reading that falls into a loop is cut back (ported from the official MiniCPM-OCR
+   SDK). The JSON counts the cuts in `postprocessing.repetition_cuts`.
+2. **OTSL to HTML.** MiniCPM writes tables in OTSL. They are converted with the same converter PaddleX uses.
+3. **Table line breaks.** MiniCPM writes an in-cell line break as a *real* newline (PaddleOCR-VL writes a
+   literal `\n`). Both become `<br>`, so the CSV keeps the line break inside the cell. This happens inside
+   the Reader, so `postprocessing.tables_with_line_breaks_fixed` (the count of the literal `\n` fix) stays 0
+   with MiniCPM.
+4. **Simplified to Traditional repair**, as for PaddleOCR-VL. It is document-level and runs after all
+   pages, which is why it comes after the Reader and not inside it.
+
+The truncated-block re-read (`--no-recover`) also works with MiniCPM.
+
+What differs from PaddleOCR-VL in the text: MiniCPM keeps the printed spacing around Latin letters and
+digits (`表 1-1`, `OCR 及`), writes `[...]` for the printed `〔...〕`, and uses `(...)` for full-width
+brackets inside table cells. These cost error-rate points when the text layer is the reference, though they
+are cosmetic. It also misreads the odd character the repair cannot fix: `爰` came out as the Simplified `爱`,
+which the repair turned into `愛`.
+
+**Measurement (a stand-in, not the sample).** The 21-page insurance policy that the numbers above come from
+was not available when MiniCPM was added. For a first check, pages 3 to 12 of a different Traditional
+Chinese proposal PDF (digital-born, 5,961 text-layer characters, 10 pages) were run with `ocr_eval.py`:
+
+| Reader | errors | character error rate |
+|---|---|---|
+| PaddleOCR-VL-1.6 | 0 | 0.00 % |
+| MiniCPM-OCR-1.0 | 10 | 0.17 % |
+
+This is only a smoke test of the harness and the Reader on a stand-in document. It is not a baseline and it
+does not say which Reader is better on the sample. The measurement on the sample is a later ticket.
+Roughly the same time per page for both Readers (about 65 s for these 10 pages, including the
+model load).
+
+### How the worker is wired in
+
+The main command builds the PaddleOCR pipeline with the Layout model only (PaddleOCR-VL's weights are not
+loaded for `--reader minicpm`). Then it replaces the pipeline's per-block recognizer with a bridge that
+sends each crop to the worker as a PNG file in a temporary folder and reads the answer back as one line of
+JSON. The worker is a long-lived process: the model is loaded once, and the main command stops it at the
+end of the run, whatever happens. The code is in `reader_bridge.py` (the hook), `worker_client.py` (the
+process and protocol) and `worker/` (the torch side).
+
+The hook uses three private PaddleX names. A start-up check verifies them and stops with a clear message
+if a PaddleX upgrade has moved them (`uv sync` restores the pinned versions), and a test runs the hook
+against the real pipeline.
+
+If the worker crashes or stops answering, the page it was reading is recorded in `source.pages_failed`
+(exit code 1) with the worker's last messages, and the next page starts a fresh worker. Every wait has a
+timeout, so a stuck worker cannot hang the run.
+
 ## Caveats
 
-- The tuning was measured on one Traditional Chinese document. Other languages and layouts should work,
-  but these numbers do not carry over to them.
+- The tuning was measured on one Traditional Chinese document, with PaddleOCR-VL. Other languages and
+  layouts should work, but these numbers do not carry over to them. MiniCPM-OCR-1.0 became the default
+  before it was measured on that document; see the stand-in measurement above.
+- `--reader minicpm` needs the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
+  torch wheel targets CUDA 13.2; a driver that supports only CUDA 13.0 needs a different torch index in
+  `worker/pyproject.toml`. This was not tested.
 - About 94 of the 23,390 characters in the sample are still wrong, and these are model errors:
   - a repeated 腫→腗 misread in the ICD tables
   - a few small blocks the layout model never detects
@@ -190,15 +287,30 @@ The output is deterministic: running the same PDF twice gives identical Markdown
 
 ```bash
 uv sync                      # includes the pytest dev group
-uv run pytest                # fast tests; the end-to-end tests skip without a PDF
+uv run pytest                # fast tests; the tests that need a PDF skip without one
 PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf uv run pytest          # also run the CLI on pages 1-3 (GPU + models)
 ```
 
-The end-to-end tests (`tests/test_e2e.py`, marker `gpu`) run the CLI twice on a PDF that has a real text
-layer. They check the output structure, that the character error rate against the text layer stays at or
-below the bound in `tests/baseline.json`, and that both runs give identical Markdown and JSON.
-`PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, now `1-3`), `PDF_OCR_MODELS_DIR` and `PDF_OCR_CER_BOUND` override the pages, the
-models folder and the bound.
+The fast tests need neither a GPU nor models: the prompt and token limit of each block label, the
+clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
+a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, and the `--reader` options.
+
+The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer), the models and, for
+MiniCPM, the worker environment:
+
+- `tests/test_hook_regression.py` runs the hook on a real page with the real Layout model and a fake Reader.
+  It needs no Reader weights and little GPU memory, and it fails when a PaddleX upgrade moves the private
+  names the hook uses.
+- `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
+  is recorded as failed, and the next page gets a new worker.
+- `tests/test_e2e.py` runs the CLI twice, once per Reader, on a few pages. It checks the output structure (the
+  same for both Readers), that the character error rate against the text layer stays at or below the bound
+  in `tests/baseline.json`, and that both runs give identical Markdown and JSON.
+
+`PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, now `1-3`), `PDF_OCR_MODELS_DIR`,
+`PDF_OCR_CER_BOUND`, `PDF_OCR_READERS` (default `minicpm,paddle`) and `PDF_OCR_WORKER_ENV` (the worker's
+virtual environment; default `worker/.venv`) override the pages, the models folder, the bound, the Readers
+to run and the worker environment. `PDF_OCR_WORKER_ENV` also works for the CLI itself.
 
 `ocr_eval.py` is the error-rate harness. The PDF's characters are assigned to Blocks by position, so
 reading order does not matter. It also runs standalone on a finished run and prints the error rate per

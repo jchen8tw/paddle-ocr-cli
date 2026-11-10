@@ -11,5 +11,19 @@
     "reader": "PaddleOCR-VL-1.6 with pdf_ocr.py defaults",
     "errors": 0,
     "ref_chars": 5961
+  },
+  "stand_in_measurements": {
+    "_comment": "NOT the baseline and NOT the sample: a smoke measurement of both Readers on a different, digital-born Traditional Chinese proposal PDF, pages 3-12, with `python ocr_eval.py` (pdf_ocr.py defaults). The sample's baseline per Reader is still to be measured.",
+    "pdf": "a digital-born Traditional Chinese proposal PDF (not the sample)",
+    "pages": "3-12",
+    "ref_chars": 5961,
+    "readers": {
+      "paddle": {
+        "errors": 0
+      },
+      "minicpm": {
+        "errors": 10
+      }
+    }
   }
 }

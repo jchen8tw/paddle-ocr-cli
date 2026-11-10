@@ -1,0 +1,17 @@
+[project]
+name = "pdf-ocr-worker"
+version = "0.1.0"
+description = "Torch worker for pdf_ocr.py: MiniCPM-OCR-1.0 Reader and MiniCPM-OCR Jev Judge (see docs/adr/0001)"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "torch==2.15.0",
+    "torchvision==0.29.2",       # the Jev video processor imports it
+    "transformers>=5.21,<5.23",  # minicpm_ocr and Qwen3_5ForSequenceClassification; resolved 5.22.2
+    # Renderer pins from MiniCPM-OCR scripts/minicpm-ocr-jev/requirements.txt: they decide the rendered pixels.
+    "playwright==1.62.0",
+    "pillow==12.3.0",
+    "markdown==3.10.3",
+]
+
+[tool.uv]
+package = false
