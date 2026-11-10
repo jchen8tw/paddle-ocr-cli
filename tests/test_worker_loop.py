@@ -18,8 +18,8 @@ class FakeReader:
     def __init__(self):
         self.calls = []
 
-    def read(self, image, prompt, max_new_tokens):
-        self.calls.append((image, prompt, max_new_tokens))
+    def read(self, image, prompt, max_new_tokens, decode=None):
+        self.calls.append((image, prompt, max_new_tokens) if decode is None else (image, prompt, max_new_tokens, decode))
         if prompt == "BOOM":
             raise RuntimeError("CUDA out of memory")
         return [{"text": f"read {Path(image).name}", "tokens": 3, "finish": "stop"}]
@@ -39,6 +39,14 @@ def test_a_read_request_is_answered_with_its_id_and_the_readings():
                     "max_new_tokens": 512}], reader)
     assert replies == [{"id": 7, "ok": True, "readings": [{"text": "read b12.png", "tokens": 3, "finish": "stop"}]}]
     assert reader.calls == [("/tmp/x/b12.png", "Text Recognition:", 512)]
+
+
+def test_a_sampled_read_passes_its_decoding_settings_on_and_a_greedy_one_passes_none():
+    reader = FakeReader()
+    decode = {"mode": "sample", "temperature": 0.3, "top_k": 20, "top_p": 0.8, "n": 4, "seed": 99}
+    run([{"id": 1, "op": "read", "image": "a.png", "prompt": "p", "max_new_tokens": 5, "decode": decode},
+         {"id": 2, "op": "read", "image": "a.png", "prompt": "p", "max_new_tokens": 5}], reader)
+    assert reader.calls == [("a.png", "p", 5, decode), ("a.png", "p", 5)]
 
 
 def test_the_loop_ends_on_quit_and_ignores_what_follows():

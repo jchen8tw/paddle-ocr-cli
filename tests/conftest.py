@@ -134,3 +134,10 @@ def reread_runs(sample_pdf, models_dir, reread_pages, reader, tmp_path_factory) 
     """Output folders of two identical runs with --judge-threshold 0.9999, which forces the re-reads."""
     return [run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_reread{i}"), models_dir, reread_pages,
                                 reader, "--judge-threshold", REREAD_THRESHOLD) for i in (1, 2)]
+
+
+@pytest.fixture(scope="session")
+def cli_run_judge_without_rereads(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> Path:
+    """One run with the Judge on and a threshold of 0, so that nothing is ever re-read."""
+    return run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_noreread"), models_dir, pages, reader,
+                               "--judge-threshold", "0")

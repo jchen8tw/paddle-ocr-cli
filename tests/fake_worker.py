@@ -19,7 +19,7 @@ spec.loader.exec_module(serve_mod)
 
 
 class FakeReader:
-    def read(self, image, prompt, max_new_tokens):
+    def read(self, image, prompt, max_new_tokens, decode=None):
         marker = os.environ.get("FAKE_CRASH_ONCE")  # crash on the first read of the first process only
         if marker and not Path(marker).exists():
             Path(marker).write_text("crashed")

@@ -320,7 +320,7 @@ again, up to nine more times, and the best Reading is kept (next section).
   reason. A failure on one Block never stops the run: the Reading is kept and the failure recorded. A page whose
   Judge call fails entirely gets `forward_error` on all its judged Blocks.
 - **On stderr**, each page's line says how many of its judged Blocks are below the threshold (after re-reading)
-  and how many were re-read, e.g. `[  2/21] page 4: 13 blocks, 35.4s, 11 of 13 judged below the threshold, 13 re-read`,
+  and how many were re-read, e.g. `[  4/5] page 7: 11 blocks, 30.9s, 9 of 11 judged below the threshold, 9 re-read` (stand-in PDF, default threshold),
   with the number not scored in brackets when there are some. The Markdown contains no Scores or markers.
 - **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
   of a merged table.
@@ -362,7 +362,7 @@ schedule is fixed; each step runs only while the best Score so far is below the 
 | round | how the Block is read | Readings |
 |---|---|---|
 | 1 | greedy, the Block's own crop (the normal first Reading) | 1 |
-| 2 | greedy, the crop resampled to 1.25x | 1 |
+| 2 | greedy, from a 1.25x render of the page | 1 |
 | 3 | sampled, temperature 0.3 (top-k 20, top-p 0.8), seeded | 4 |
 | 4 | sampled, temperature 0.7 (top-k 20, top-p 0.8), seeded | 4 |
 
@@ -376,7 +376,8 @@ schedule is fixed; each step runs only while the best Score so far is below the 
   crop, whatever scale the Reading was made from.
 - **In the JSON**, a re-read Block has `readings`, one entry per *distinct* text: `content` (the text as it was
   judged), `score`, `verdict`, and how it was produced: `round`, `decode` (`greedy` or `temperature`), `temperature`
-  and `scale`; `duplicates` counts the later Readings that gave the same text. `stop_reason` says why the re-reading
+  and `scale` (plus `scale_source` for a scaled Reading); `duplicates` counts the later Readings that gave the
+  same text. `stop_reason` says why the re-reading
   ended: `passed` (a Reading reached the threshold), `exhausted` (all rounds done, none did), `no_scored` (all
   rounds done and no Reading could be scored; the first Reading is kept), `judge_error` (the Judge failed on a
   Reading, or on the whole batch, part-way: the best Reading so far is kept). If the Judge fails on the *first*
@@ -395,30 +396,38 @@ schedule is fixed; each step runs only while the best Score so far is below the 
   `--reader paddle` only round 2 (the 1.25x input) is run, rounds 3 and 4 are skipped and listed in the Block's
   `skipped_rounds` (and flagged `supported: false` in `settings.reread_schedule`) instead of being faked with
   repeats. PaddleOCR-VL resizes every crop to its own pixel budget, so round 2 often gives the same text again.
-- **Round 2 is a resampled crop, not a page re-render.** "A 1.25x render" is implemented as the pipeline's own
-  crop of the Block enlarged by 1.25 (Lanczos), as the MiniCPM SDK's own scale round does. A page re-render would
-  give new pixels, but it cannot reproduce what the pipeline feeds the Reader for merged Blocks, formulas (margins
-  cropped) and tables (figure placeholders painted in). The page-render variant was not measured.
+- **Round 2 reads a 1.25x render of the page.** The page is rendered again at 1.25 times the `--dpi`, and the
+  Block's box is cut from it, so the Reader gets new pixels. That is only done when the image the pipeline gave the
+  Reader is exactly the plain crop of the page's own render at that box (checked pixel for pixel): a merged Block,
+  a formula with its margins cut, a table with figure placeholders painted in, or a Block cut with a polygon mask is
+  not, and its own crop is enlarged by 1.25 (Lanczos) instead. Each Reading says which one it came from
+  (`scale_source`: `page_render` or `crop_resample`), and `postprocessing.judge.scaled_images_by_source` counts them.
+  On the stand-in the page render was used for 60 of 61 Blocks (MiniCPM) and 23 of 24 (paddle). It did not help much:
+  see the measurements below.
 - **Batched per page.** Round by round, only the Blocks still below the threshold are read, and each round is one
   batch of Reader requests and **one** Judge call (one Chromium launch) for the call's new Readings, not one per
   Block. The pipeline hands the Reader one call per pixel-budget group of a page, so this is per call.
   A sampled round costs one worker request per Block (4 samples decoded together, with only the last position's
   logits computed at prefill, which keeps a 4-sample table read inside the card's memory next to the Judge).
 - **Cost, measured on the stand-in PDF** (a digital-born Traditional Chinese proposal, *not* the sample; pages 4-8,
-  61 judged Blocks, MiniCPM Reader, RTX 4070 Ti): at the default 0.98, 59 of the 61 Blocks were re-read and none of
-  them reached 0.98 (`exhausted`); the 5 pages took 179 s against 58 s when nothing is re-read (`--judge-threshold 0`),
-  about 2 s more per re-read Block. At 0.9999 it was the same: 61 re-read, 184 s. Re-reading helped little there:
-  the 549 extra Readings made at 0.9999 contained only 12 distinct new texts (4 from the 1.25x round, 5 from the 0.3
-  samples, 3 from the 0.7 samples) spread over 9 Blocks; the Score went up for 5 Blocks (mean gain over all re-read
-  Blocks 0.005, largest 0.21) and the written text changed for 5.
-  With the paddle Reader on pages 4-5 (24 Blocks) round 2 gave the same text for all 24. These numbers say the
-  schedule, as specified, spends most of its time on duplicates; the threshold calibration (a later ticket) decides how
-  often it runs at all.
-- **GPU memory.** MiniCPM + Jev + the Layout model peaked at 10.6 GB of the card's 12.3 GB (`nvidia-smi`, whole
-  card, about 1 GB of it other desktop processes) during these re-read runs, whose largest table Reading was a few
-  thousand tokens. The 4-sample rounds need the worker's last-position-only logits (`worker/minicpm_model.py`); without
-  it a 4-sample table Reading ran out of memory in the spike. A table that does run out of memory in a re-read round
-  ends that Block with `reader_error` and keeps its best Reading.
+  61 judged Blocks, MiniCPM Reader, RTX 4070 Ti). **At the default threshold of 0.98, 59 of the 61 Blocks were
+  re-read and none of them reached 0.98 (`exhausted`); the 5 pages took 179 s, against 58 s when nothing is
+  re-read (`--judge-threshold 0`), about three times as long.** Defaults are unchanged until the threshold is
+  calibrated. At 0.9999 all 61 were re-read in 188 s. Re-reading helped little there: the 549 extra Readings
+  contained only 13 distinct new texts (4 from the 1.25x page render, 6 from the 0.3 samples, 3 from the 0.7
+  samples) spread over 9 Blocks; the winning Reading differs from the first for 5 Blocks, the Score went up for 5
+  (mean gain over all re-read Blocks 0.005, largest 0.21), and no Block reached the threshold. With the paddle Reader
+  on pages 4-5 (24 Blocks, 46 s) the 1.25x page render gave the same text for all 24. The schedule, as specified,
+  spends most of its time on duplicates; the threshold calibration (a later ticket) decides how often it runs at all.
+- **GPU memory.** With the Layout model, MiniCPM and Jev loaded, `nvidia-smi` (whole card, 1 s samples, about 1 GB of
+  it other desktop processes) peaked at 10.6 GB of 12.3 GB over the MiniCPM runs above, and at 9.6 GB for the paddle
+  run. The tables in those runs were small (319 to 380 characters of HTML). On the largest table crop available (1369 x
+  1091 px, 2561 prompt tokens, 239 generated tokens) the worker alone went from 8.2 GB (both models idle) to 9.8 GB
+  while decoding 4 seeded samples at 0.7, and the second call with the same seed gave identical texts. **The worst
+  case, 4 samples of a table that runs to the 8192-token limit, was not run.** The 4-sample rounds rely on the worker
+  computing only the last position's logits at prefill (`worker/minicpm_model.py`); without it a 4-sample table Reading
+  ran out of memory in the spike. A Reader error in a re-read round (including running out of memory) ends that Block
+  with `reader_error` and keeps its best Reading, and the end-of-run hint about GPU memory is shown.
 
 **Scores are not bit-for-bit reproducible across machines**, and the authors say thresholds must be calibrated on
 your own data. On one machine and one GPU the same PDF gives identical Scores (the end-to-end test runs it twice
@@ -472,8 +481,10 @@ timeout, so a stuck worker cannot hang the run.
   layouts should work, but these numbers do not carry over to them. MiniCPM-OCR-1.0 became the default
   before it was measured on that document; see the stand-in measurement above.
 - The Judge adds three setup items (Chromium, `node`, Noto Sans CJK) and about 2.6 s per page; `--no-judge` avoids
-  them. With the default threshold of 0.98 most Blocks are flagged (see "The Judge"), and a Score is only as
-  comparable as the machine it was made on.
+  them. With the default threshold of 0.98 most Blocks are flagged and, since a flagged Block is re-read, **most
+  Blocks are also re-read: on the stand-in the five pages took about three times as long as without re-reading**
+  (179 s against 58 s; see "Re-reading low-Score Blocks"). `--judge-threshold 0` turns the re-reading off while
+  keeping the Scores. A Score is only as comparable as the machine it was made on.
 - `--reader minicpm` and the Judge need the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
   torch wheel targets CUDA 13.2; a driver that supports only CUDA 13.0 needs a different torch index in
   `worker/pyproject.toml`. This was not tested.
@@ -486,8 +497,9 @@ timeout, so a stuck worker cannot hang the run.
   corrected.
 - If a PDF already has a real text layer, as the sample does, extracting that text directly is exact.
   OCR is what matters for scanned PDFs.
-- Speed: about 3.5 minutes for the 21-page sample on an RTX 4070 Ti (12 GB), plus a few seconds to load
-  the models.
+- Speed: about 3.5 minutes for the 21-page sample on an RTX 4070 Ti (12 GB) with PaddleOCR-VL alone and no Judge,
+  plus a few seconds to load the models. The Judge and the re-reads add to that (see above); the sample has not been
+  re-timed with them.
 - Some harmless messages still appear on stderr, such as `which: no ccache` and a "Bucketed
   engine_config" warning.
 
@@ -517,8 +529,9 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   names the hook uses.
 - `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
   is recorded as failed, and the next page gets a new worker.
-- `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge`, for each Reader, on a few
-  pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a
+- `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge` and once with
+  `--judge-threshold 0` (Judge on, nothing re-read, whose Markdown must equal the `--no-judge` one), for each
+  Reader, on a few pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a
   `verdict` and a `below_threshold` and charts, seals and figures have none, that stderr counts the Blocks below
   the threshold per page, that the Markdown has no Scores, that `--no-judge` gives no Scores and records
   `judge: false`, that the character error rate against the text layer stays at or below the bound in

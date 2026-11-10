@@ -474,6 +474,31 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
     return notes
 
 
+class PageRenders:
+    """The current page for the re-read of a Block at another scale: its own crops and crops of a re-render at
+    `dpi * factor` (rendered once per factor and page)."""
+
+    def __init__(self, page, img, scale: float, dpi: float):
+        self.page, self.img, self.scale, self.dpi = page, img, scale, dpi
+        self._renders: dict[float, tuple] = {}
+
+    def original(self, bbox):
+        x1, y1, x2, y2 = bbox
+        return self.img[max(y1, 0):y2, max(x1, 0):x2]
+
+    def crop(self, bbox, factor: float):
+        """The Block's box cut from the page rendered `factor` times larger, or None if the render could not be made
+        that much larger (the render size is capped)."""
+        if factor not in self._renders:
+            self._renders[factor] = render_page(self.page, self.dpi * factor)
+        img2, scale2 = self._renders[factor]
+        k = scale2 / self.scale
+        if abs(k - factor) > 0.01:
+            return None
+        x1, y1, x2, y2 = (round(v * k) for v in bbox)
+        return img2[max(y1, 0):y2, max(x1, 0):x2]
+
+
 class InkReread:
     """The ink-based re-read inside the bridge (--reader minicpm --no-judge): the bridge hands over each Reading;
     the page it belongs to is set here before the pipeline runs. Re-reads go straight to the Reader."""
@@ -597,6 +622,8 @@ def reading_json(r) -> dict:
     """One Reading of a re-read Block: its text, Score and verdict, and how it was produced."""
     d = {"content": r.text, "score": None if r.score is None else round(r.score, 6), "verdict": r.verdict,
          "round": r.round, "decode": r.decode, "temperature": r.temperature, "scale": r.scale}
+    if r.scale_source:
+        d["scale_source"] = r.scale_source  # a re-render of the page, or the Block's crop resampled
     if r.detail and r.verdict != "scored":
         d["verdict_detail"] = r.detail
     if r.duplicates:
@@ -640,7 +667,7 @@ def judge_summary(outcomes: dict) -> dict:
 
 def memory_hint(errors: dict, outcomes: dict) -> str | None:
     """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
-    texts = [*errors.values(), *(o.verdict_detail or "" for o in outcomes.values())]
+    texts = [*errors.values(), *(f"{o.verdict_detail or ''} {o.stop_detail or ''}" for o in outcomes.values())]
     if not any("out of memory" in t.lower() for t in texts):
         return None
     return ("hint: the GPU ran out of memory. The Judge and the Reader need to fit next to each other and to whatever "
@@ -935,6 +962,7 @@ def _transcribe(args, stack) -> int:
             img, scale = render_page(page, args.dpi)
             if bridge is not None:
                 bridge.current_page = idx
+                bridge.page_source = PageRenders(page, img, scale, args.dpi)
                 ink.set_page(page, img, scale)
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             recovered = []
@@ -999,7 +1027,8 @@ def _transcribe(args, stack) -> int:
             "tables_with_line_breaks_fixed": tables_fixed,
             **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
             "script_repair": script_info,
-            **({"judge": judge_summary(outcomes)} if bridge and not args.no_judge else {}),
+            **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
+               if bridge and not args.no_judge else {}),
         },
         "csv_tables": csv_info,
         "elapsed_seconds": round(time.time() - t_start, 1),

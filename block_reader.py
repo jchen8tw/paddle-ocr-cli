@@ -95,6 +95,7 @@ class BlockRequest:
     bbox: tuple | None = None
     payload: Any = None  # whatever the Reader adapter needs besides the above (the pipeline's query string)
     block_id: str | None = None
+    scaler: Any = None   # offers `source(scale)`: where the Block's image at another scale comes from (a re-render, a resample)
 
     @property
     def seed_id(self) -> str:
@@ -153,6 +154,7 @@ class Reading:
     decode: str
     temperature: float | None
     scale: float
+    scale_source: str | None = None            # for a scaled Reading: "page_render" or "crop_resample"
     verdict: str | None = None
     score: float | None = None                 # a real Score, only with verdict "scored"
     detail: str | None = None
@@ -246,6 +248,9 @@ def read_blocks(requests: list[BlockRequest], reader: Reader, judge: Judge | Non
 
 def _new_reading(block: _Block, text: str, step: ReadStep, settings: ReadSettings, *, survey: bool) -> Reading:
     reading = Reading(text, step.round, step.decode, step.temperature, step.scale)
+    scaler = block.request.scaler
+    if step.scale != 1.0 and scaler is not None:
+        reading.scale_source = scaler.source(step.scale)
     if settings.repair is not None:
         repaired, decided = settings.repair.apply(text, block.request.label, survey=survey)
         reading.judged_before_script_decision = not decided

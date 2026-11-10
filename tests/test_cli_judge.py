@@ -172,7 +172,7 @@ def test_the_postprocessing_summary_counts_blocks_verdicts_and_early_judgements(
 
 
 def test_the_postprocessing_summary_reports_re_read_blocks_and_those_still_below_the_threshold():
-    r = lambda text, rnd, score, dup=0: Reading(text, rnd, "greedy", None, 1.0, "scored", score, duplicates=dup)
+    r = lambda text, rnd, score, dup=0: Reading(text, rnd, "greedy", None, 1.0, verdict="scored", score=score, duplicates=dup)
     outcomes = {
         (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False),     # passed at once
         (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False,
@@ -197,9 +197,9 @@ def test_the_page_line_on_stderr_reports_blocks_below_the_threshold_and_blocks_r
 # --- a re-read Block in the JSON ----------------------------------------------------------------------------
 
 def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_reading_stopped():
-    readings = [Reading("你好", 1, "greedy", None, 1.0, "scored", 0.4, duplicates=1),
-                Reading("你號", 3, "temperature", 0.3, 1.0, "scored", 0.93),
-                Reading("x", 4, "temperature", 0.7, 1.0, "render_error", None, "render_failed")]
+    readings = [Reading("你好", 1, "greedy", None, 1.0, verdict="scored", score=0.4, duplicates=1),
+                Reading("你號", 3, "temperature", 0.3, 1.0, verdict="scored", score=0.93),
+                Reading("x", 2, "greedy", None, 1.25, "page_render", "render_error", None, "render_failed")]
     o = outcome(text="你號", judged=True, score=0.93, verdict="scored", below_threshold=True, readings=readings,
                 stop_reason="exhausted", skipped_rounds=[{"round": 2, "reason": "r"}])
     (b,) = page([block(block_content="你號")], {(0, (1, 2, 30, 40)): o})["blocks"]
@@ -209,8 +209,8 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
          "scale": 1.0, "duplicates": 1},
         {"content": "你號", "score": 0.93, "verdict": "scored", "round": 3, "decode": "temperature", "temperature": 0.3,
          "scale": 1.0},
-        {"content": "x", "score": None, "verdict": "render_error", "round": 4, "decode": "temperature",
-         "temperature": 0.7, "scale": 1.0, "verdict_detail": "render_failed"}]
+        {"content": "x", "score": None, "verdict": "render_error", "round": 2, "decode": "greedy",
+         "temperature": None, "scale": 1.25, "scale_source": "page_render", "verdict_detail": "render_failed"}]
     assert b["skipped_rounds"] == [{"round": 2, "reason": "r"}]
 
 
@@ -238,6 +238,12 @@ def test_a_page_error_or_a_verdict_detail_about_memory_gives_one_hint_naming_the
     for errors, outcomes in (({3: "RuntimeError: CUDA out of memory. Tried to allocate"}, {}), ({}, {(0, (0, 0, 1, 1)): oom})):
         hint = pdf_ocr.memory_hint(errors, outcomes)
         assert "--no-judge" in hint and "--reader minicpm" in hint and "GPU" in hint
+
+
+def test_a_re_read_that_ran_out_of_memory_also_gives_the_hint():
+    oom = outcome(judged=True, verdict="scored", score=0.5, below_threshold=True, readings=[], stop_reason="reader_error",
+                  stop_detail="round 3: worker error: OutOfMemoryError: CUDA out of memory")
+    assert "GPU" in pdf_ocr.memory_hint({}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_other_failures_give_no_memory_hint():

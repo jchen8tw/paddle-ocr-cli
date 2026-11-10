@@ -125,9 +125,12 @@ def test_no_judge_gives_no_scores_and_records_that_the_judge_was_off(cli_run_no_
 
 
 def test_the_markdown_is_the_same_whether_or_not_the_judge_ran_unless_the_ink_reread_changed_a_block(
-        cli_runs, cli_run_no_judge, sample_pdf):
-    md_judged, doc_judged = load(cli_runs[0], sample_pdf)
+        cli_run_judge_without_rereads, cli_run_no_judge, sample_pdf):
+    """The Judge alone changes nothing about the text. (With a threshold that triggers re-reads the Markdown can
+    legitimately differ, which is why this run uses --judge-threshold 0.)"""
+    md_judged, doc_judged = load(cli_run_judge_without_rereads, sample_pdf)
     md_plain, doc_plain = load(cli_run_no_judge, sample_pdf)
+    assert not any("readings" in b for p in doc_judged["pages"] for b in p["blocks"])
     if any("content_before_reread" in b for p in doc_plain["pages"] for b in p["blocks"]):
         pytest.skip("the ink-based re-read changed a block, so the two Markdowns legitimately differ")
     assert md_judged == md_plain

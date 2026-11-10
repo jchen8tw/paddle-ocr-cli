@@ -13,6 +13,7 @@ fails with a clear message (and tests/test_hook_regression.py fails in CI).
 """
 from __future__ import annotations
 
+import collections
 import inspect
 import itertools
 import sys
@@ -186,14 +187,61 @@ class _DownJudge:
 
 
 def scaled_image(image, scale: float):
-    """A BGR crop resampled by `scale` (Lanczos), for the greedy 1.25x round. The Judge always sees the Block's
-    own, unscaled crop."""
+    """A BGR crop resampled by `scale` (Lanczos). The Judge always sees the Block's own, unscaled crop."""
     if scale == 1.0:
         return image
     import cv2
 
     h, w = image.shape[:2]
     return cv2.resize(image, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_LANCZOS4)
+
+
+PAGE_RENDER, CROP_RESAMPLE = "page_render", "crop_resample"
+
+
+class BlockScaler:
+    """A Block's image at another scale (the greedy 1.25x round).
+
+    The better source is a re-render of the page at that scale, cropped at the Block's box: new pixels, as the
+    ticket says. It is only used when the image the pipeline gave the Reader is exactly the plain crop of the
+    page's own render at that box (merged Blocks, formulas with their margins cut, tables with figure tokens
+    painted on and polygon-masked Blocks are not). Otherwise the image is resampled. `page_source` offers
+    `original(bbox)` (the page's own crop) and `crop(bbox, factor)` (the re-rendered one, or None).
+    """
+
+    def __init__(self, image, bbox, page_source, stats=None):
+        self.image, self.bbox, self.page_source, self.stats = image, bbox, page_source, stats
+        self._cache: dict[float, tuple] = {}
+
+    def get(self, scale: float) -> tuple:
+        """(image, source) for `scale`; source is None at 1x."""
+        if scale == 1.0:
+            return self.image, None
+        if scale not in self._cache:
+            self._cache[scale] = self._render(scale) or (scaled_image(self.image, scale), CROP_RESAMPLE)
+            if self.stats is not None:
+                self.stats[self._cache[scale][1]] += 1
+        return self._cache[scale]
+
+    def source(self, scale: float) -> str | None:
+        return self.get(scale)[1]
+
+    def _render(self, scale: float):
+        import numpy as np
+
+        if self.page_source is None or self.bbox is None:
+            return None
+        original = self.page_source.original(self.bbox)
+        if original is None or original.shape != self.image.shape or not np.array_equal(original, self.image):
+            return None
+        crop = self.page_source.crop(self.bbox, scale)
+        return None if crop is None or crop.size == 0 else (crop, PAGE_RENDER)
+
+
+def block_image(request, scale: float):
+    """The image of a request at `scale`: its scaler's, or a resample."""
+    scaler = getattr(request, "scaler", None)
+    return scaler.get(scale)[0] if scaler is not None else scaled_image(request.image, scale)
 
 
 # Sampling parameters of the temperature rounds (the MiniCPM-OCR SDK's own sampling rounds use them).
@@ -219,7 +267,7 @@ class _MiniCPMRead:
                 "mode": "sample", "temperature": step.temperature, "top_k": SAMPLE_TOP_K, "top_p": SAMPLE_TOP_P,
                 "n": step.samples, "seed": seed}
             try:
-                path = self.crops.path(r.key if step.scale == 1.0 else f"{r.key}@{step.scale:g}", scaled_image(r.image, step.scale))
+                path = self.crops.path(r.key if step.scale == 1.0 else f"{r.key}@{step.scale:g}", block_image(r, step.scale))
                 answers.append([x["text"] for x in self.client.read(path, prompt, limit, decode=decode)])
             except WorkerError as e:
                 if step.round == 1:
@@ -251,7 +299,7 @@ class _PaddleRead:
                     print(f"warning: could not move the Judge off the GPU: {e}", file=sys.stderr)
             try:
                 results = list(self.model.predict(
-                    [{"image": scaled_image(r.image, step.scale), "query": r.payload} for r in requests],
+                    [{"image": block_image(r, step.scale), "query": r.payload} for r in requests],
                     **self.kwargs))
             finally:
                 if self.after:
@@ -283,6 +331,8 @@ class ReaderBridge:
         self.doc_hash = doc_hash  # with the page and the Block, what the sampling seeds of the re-read rounds are made of
         self.repetition_cuts = 0
         self.current_page = 0
+        self.scale_sources: dict[str, int] = collections.Counter()  # scaled images made, by where they came from
+        self.page_source = None  # set per page by the caller: lets round 2 re-render the page (see BlockScaler)
         self.outcomes: dict[tuple, block_reader.BlockResult] = {}
 
     def _reader(self, kwargs: dict, crops: CropFiles):  # a block_reader.Reader
@@ -315,7 +365,8 @@ class ReaderBridge:
                 block_index = getattr(query, "block_index", None)
                 requests.append(block_reader.BlockRequest(
                     f"p{self.current_page}/b{n}", inp["image"], label, bbox, str(query),
-                    block_id=None if block_index is None else str(block_index)))
+                    block_id=None if block_index is None else str(block_index),
+                    scaler=BlockScaler(inp["image"], bbox, self.page_source, self.scale_sources)))
             settings = block_reader.ReadSettings(
                 self.threshold, self._clean, self.repair if self.judge else None,
                 (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None,
