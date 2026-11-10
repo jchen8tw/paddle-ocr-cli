@@ -16,3 +16,15 @@ explicit = true
 
 [tool.uv.sources]
 paddlepaddle-gpu = { index = "paddle" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "gpu: slow end-to-end test that needs the GPU, the models and a sample PDF (PDF_OCR_SAMPLE_PDF)",
+]
