@@ -162,7 +162,7 @@ class WorkerJudge:
         payload, results = [], [None] * len(items)
         for k, item in enumerate(items):
             try:
-                payload.append((k, {"key": item.key, "image": str(self.crops.path(item.key, item.image)),
+                payload.append((k, {"key": item.key, "image": str(self.crops.path(item.image_key or item.key, item.image)),
                                     "text": item.text, "category": item.category}))
             except OSError as e:
                 results[k] = JudgeVerdict("encode_error", None, str(e))
@@ -185,38 +185,82 @@ class _DownJudge:
         raise self.error
 
 
+def scaled_image(image, scale: float):
+    """A BGR crop resampled by `scale` (Lanczos), for the greedy 1.25x round. The Judge always sees the Block's
+    own, unscaled crop."""
+    if scale == 1.0:
+        return image
+    import cv2
+
+    h, w = image.shape[:2]
+    return cv2.resize(image, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_LANCZOS4)
+
+
+# Sampling parameters of the temperature rounds (the MiniCPM-OCR SDK's own sampling rounds use them).
+SAMPLE_TOP_K = 20
+SAMPLE_TOP_P = 0.8
+
+
 class _MiniCPMRead:
-    def __init__(self, client, crops: CropFiles, table_limit: int):
+    """MiniCPM-OCR-1.0 in the worker: every round of the schedule. A failure in a re-read round is returned for that
+    Block (the Block keeps its best Reading so far); in round 1 it propagates and fails the page."""
+
+    def __init__(self, client, crops: CropFiles | None, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
 
-    def read(self, requests):
-        texts = []
-        for r in requests:
+    def supports(self, step) -> bool:
+        return True
+
+    def read(self, requests, step, seeds):
+        answers = []
+        for r, seed in zip(requests, seeds):
             prompt, limit = minicpm_reader.prompt_and_limit(r.label, table_limit=self.table_limit)
-            texts.append(self.client.read(self.crops.path(r.key, r.image), prompt, limit)[0]["text"])
-        return texts
+            decode = None if step.decode == "greedy" else {
+                "mode": "sample", "temperature": step.temperature, "top_k": SAMPLE_TOP_K, "top_p": SAMPLE_TOP_P,
+                "n": step.samples, "seed": seed}
+            try:
+                path = self.crops.path(r.key if step.scale == 1.0 else f"{r.key}@{step.scale:g}", scaled_image(r.image, step.scale))
+                answers.append([x["text"] for x in self.client.read(path, prompt, limit, decode=decode)])
+            except WorkerError as e:
+                if step.round == 1:
+                    raise
+                answers.append(e)
+        return answers
 
 
 class _PaddleRead:
     """PaddleOCR-VL's own model, called once for the page with the pipeline's own arguments. `before` and
-    `after` bracket the read (the Judge steps off the GPU, paddle's cache is released)."""
+    `after` bracket the read (the Judge steps off the GPU, paddle's cache is released).
+
+    The local PaddleOCR-VL ignores temperature and top_p (paddlex warns that they are "not supported by the local
+    model"): it decodes greedily, so the sampled rounds are not offered. The 1.25x round is a resampled input, which
+    it can honestly do (its own min/max pixel budget may map it back to the same grid; the text is then a duplicate)."""
 
     def __init__(self, model, kwargs: dict, before, after):
         self.model, self.kwargs, self.before, self.after = model, kwargs, before, after
 
-    def read(self, requests):
-        if self.before:
-            try:
-                self.before()
-            except WorkerError as e:  # the Judge's worker, not the Reader: scoring will report it, the read goes on
-                print(f"warning: could not move the Judge off the GPU: {e}", file=sys.stderr)
+    def supports(self, step) -> bool:
+        return step.decode == "greedy"
+
+    def read(self, requests, step, seeds):
         try:
-            results = list(self.model.predict(
-                [{"image": r.image, "query": r.payload} for r in requests], **self.kwargs))
-        finally:
-            if self.after:
-                self.after()
-        return [r.get("result") or "" for r in results]
+            if self.before:
+                try:
+                    self.before()
+                except WorkerError as e:  # the Judge's worker, not the Reader: scoring will report it, the read goes on
+                    print(f"warning: could not move the Judge off the GPU: {e}", file=sys.stderr)
+            try:
+                results = list(self.model.predict(
+                    [{"image": scaled_image(r.image, step.scale), "query": r.payload} for r in requests],
+                    **self.kwargs))
+            finally:
+                if self.after:
+                    self.after()
+        except Exception as e:
+            if step.round == 1:
+                raise
+            return [e] * len(requests)
+        return [[r.get("result") or ""] for r in results]
 
 
 class ReaderBridge:
@@ -233,9 +277,10 @@ class ReaderBridge:
     strip = True
 
     def __init__(self, client, tmp_dir: Path, *, to_html, judge: bool = False, judge_threshold: float = 0.98,
-                 repair=None, ink_reread=None):
+                 repair=None, ink_reread=None, doc_hash: str = ""):
         self.client, self.tmp_dir, self.to_html = client, Path(tmp_dir), to_html
         self.judge, self.threshold, self.repair, self.ink_reread = judge, judge_threshold, repair, ink_reread
+        self.doc_hash = doc_hash  # with the page and the Block, what the sampling seeds of the re-read rounds are made of
         self.repetition_cuts = 0
         self.current_page = 0
         self.outcomes: dict[tuple, block_reader.BlockResult] = {}
@@ -265,10 +310,16 @@ class ReaderBridge:
                 query = inp["query"]
                 label = getattr(query, "label", None) or _LABEL_BY_QUERY.get(str(query), "text")
                 bbox = getattr(query, "bbox", None)
-                requests.append(block_reader.BlockRequest(f"p{self.current_page}/b{n}", inp["image"], label, bbox, str(query)))
+                # `block_index` is the Block's index on its page. The pipeline reads a page in one call per pixel
+                # budget, so the position within `inputs` repeats from one call to the next; the index does not.
+                block_index = getattr(query, "block_index", None)
+                requests.append(block_reader.BlockRequest(
+                    f"p{self.current_page}/b{n}", inp["image"], label, bbox, str(query),
+                    block_id=None if block_index is None else str(block_index)))
             settings = block_reader.ReadSettings(
                 self.threshold, self._clean, self.repair if self.judge else None,
-                (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None)
+                (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None,
+                doc_hash=self.doc_hash, page=self.current_page)
             judge = (_DownJudge(judge_down) if judge_down else WorkerJudge(self.client, crops)) if self.judge else None
             results = block_reader.read_blocks(requests, self._reader(kwargs, crops), judge, settings)
         finally:
@@ -281,11 +332,17 @@ class ReaderBridge:
     uses_worker_reader = False
 
     def page_summary(self, page: int) -> dict:
-        """How many Blocks of a page were judged, how many are below the threshold, how many could not be scored."""
+        """How many Blocks of a page were judged, how many were re-read, how many are (still) below the threshold,
+        how many could not be scored."""
         judged = [o for (p, _), o in self.outcomes.items() if p == page and o.judged]
         return {"judged": len(judged),
+                "reread": sum(1 for o in judged if o.readings is not None),
                 "below_threshold": sum(1 for o in judged if o.below_threshold),
                 "not_scored": sum(1 for o in judged if o.verdict != block_reader.SCORED)}
+
+    def supports(self, step) -> bool:
+        """Whether this bridge's Reader can do a round of the re-read schedule."""
+        return self._reader({}, None).supports(step)
 
     def close(self):  # the pipeline calls this when it is closed; the worker is stopped by its owner
         pass
@@ -306,7 +363,8 @@ class MiniCPMBridge(ReaderBridge):
         self.client.ensure_started()
         crops = CropFiles(self.tmp_dir)
         try:
-            raw = _MiniCPMRead(self.client, crops, max_new_tokens).read([block_reader.BlockRequest("reread", image, label)])[0]
+            raw = _MiniCPMRead(self.client, crops, max_new_tokens).read(
+                [block_reader.BlockRequest("reread", image, label)], block_reader.SCHEDULE[0], [None])[0][0]
         finally:
             crops.cleanup()
         return self._clean(raw, label)

@@ -23,10 +23,11 @@ class WorkerError(RuntimeError):
     """The worker could not be started, crashed, timed out or reported an error."""
 
 
-def read_timeout(max_new_tokens: int) -> float:
-    """Seconds to wait for one Reading: a generous floor plus time for the token limit at 10 tokens/s
-    (MiniCPM decodes at 50+ tokens/s on the reference GPU)."""
-    return 120.0 + max_new_tokens / 10.0
+def read_timeout(max_new_tokens: int, samples: int = 1) -> float:
+    """Seconds to wait for one Reading (or `samples` sampled ones, which decode together): a generous floor plus
+    time for the token limit at 10 tokens/s (MiniCPM decodes at 50+ tokens/s on the reference GPU), scaled by the
+    number of samples."""
+    return 120.0 + max_new_tokens * max(1, samples) / 10.0
 
 
 def score_timeout(n_items: int) -> float:
@@ -118,12 +119,16 @@ class WorkerClient:
 
     # ------------------------------------------------------------------ requests
 
-    def read(self, image: str, prompt: str, max_new_tokens: int, *, timeout: float | None = None) -> list[dict]:
-        """One Reading of a crop (a PNG path) for `prompt`; returns [{"text", "tokens", "finish"}]."""
-        reply = self._request({"op": "read", "image": str(image), "prompt": prompt,
-                               "max_new_tokens": max_new_tokens},
-                              read_timeout(max_new_tokens) if timeout is None else timeout)
-        return reply["readings"]
+    def read(self, image: str, prompt: str, max_new_tokens: int, *, decode: dict | None = None,
+             timeout: float | None = None) -> list[dict]:
+        """One Reading of a crop (a PNG path) for `prompt`; returns [{"text", "tokens", "finish"}]. `decode` is
+        None for greedy decoding, or {"mode": "sample", "temperature", "top_k", "top_p", "n", "seed"}, which returns
+        `n` Readings (same seed, same texts)."""
+        req = {"op": "read", "image": str(image), "prompt": prompt, "max_new_tokens": max_new_tokens}
+        if decode is not None:
+            req["decode"] = decode
+        n = (decode or {}).get("n", 1)
+        return self._request(req, read_timeout(max_new_tokens, n) if timeout is None else timeout)["readings"]
 
     def score(self, items: list[dict], *, timeout: float | None = None) -> list[dict]:
         """Score a batch of Readings: items are {"key", "image" (a PNG path), "text", "category"}; returns one
