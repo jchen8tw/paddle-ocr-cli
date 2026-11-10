@@ -74,9 +74,9 @@ def test_the_whole_page_is_re_read_in_batches_of_the_blocks_still_low(tmp_path):
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", (0, 0, 1, 1), 0), item("Table Recognition:", "table", (2, 2, 3, 3), 1)])
     assert [d is None for d in client.decodes].count(True) == 3      # text: rounds 1, 2; table: round 1
-    # one Judge call for the page's first Readings, then one per later round that produced something new (round 2
-    # read the same text again, which is not scored again); only the low Block is in them
-    assert [len(c) for c in client.score_calls] == [2, 4, 4]
+    # one Judge call for the page's first Readings, then one per later round that produced something new: round 2
+    # read the same text again (not scored again) and round 3's samples score 0.99, so only the low Block is in them
+    assert [len(c) for c in client.score_calls] == [2, 4]
 
 
 def test_samples_are_judged_as_separate_readings_with_unique_keys_but_one_crop_file(tmp_path):
