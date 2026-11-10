@@ -16,9 +16,12 @@ class FakeReader:
     def __init__(self, texts):
         self.texts, self.batches = texts, []
 
-    def read(self, requests):
+    def supports(self, step):
+        return True
+
+    def read(self, requests, step, seeds):
         self.batches.append([r.key for r in requests])
-        return [self.texts[r.key] for r in requests]
+        return [[self.texts[r.key]] for r in requests]
 
 
 class FakeJudge:
@@ -166,7 +169,7 @@ def test_a_judge_that_answers_for_the_wrong_number_of_items_is_a_forward_error()
 
 def test_a_reader_failure_is_not_swallowed_the_page_fails():
     class Broken:
-        def read(self, requests):
+        def read(self, requests, step, seeds):
             raise RuntimeError("worker crashed")
 
     with pytest.raises(RuntimeError, match="worker crashed"):
