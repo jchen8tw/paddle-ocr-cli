@@ -28,6 +28,8 @@ import warnings
 from html.parser import HTMLParser
 from pathlib import Path
 
+from script_repair import NO_REPAIR_LABELS, ScriptRepair, is_traditional
+
 ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
 VL_MODEL_DIR = "PaddleOCR-VL-1.6"
@@ -122,69 +124,6 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
 
 # --------------------------------------------------------------------------- script repair
 
-class ScriptRepair:
-    """Repair Simplified-Chinese characters inside a Traditional-Chinese document.
-
-    PaddleOCR-VL tends to drift to Simplified forms (银行, 医院, 细胞) when reading Traditional text.
-    A character is treated as drift only if it cannot be encoded in Big5 (so it is not valid
-    Traditional) and OpenCC maps it to something else. Valid Traditional characters that merely also
-    exist in Simplified (后, 干, 里, 台, 表) are never touched.
-    """
-
-    def __init__(self):
-        from opencc import OpenCC  # optional dependency
-
-        def make(name):
-            try:
-                return OpenCC(name)
-            except Exception:
-                return OpenCC(name + ".json")
-
-        self.s2t, self.t2s = make("s2t"), make("t2s")
-        self._simp: dict[str, bool] = {}
-        self._trad: dict[str, bool] = {}
-
-    def is_simplified_only(self, c: str) -> bool:
-        r = self._simp.get(c)
-        if r is None:
-            r = False
-            if "一" <= c <= "鿿":
-                try:
-                    c.encode("big5")
-                except UnicodeEncodeError:
-                    r = self.s2t.convert(c) != c
-            self._simp[c] = r
-        return r
-
-    def is_traditional_only(self, c: str) -> bool:
-        r = self._trad.get(c)
-        if r is None:
-            r = "一" <= c <= "鿿" and not self.is_simplified_only(c) and self.t2s.convert(c) != c
-            self._trad[c] = r
-        return r
-
-    def survey(self, texts) -> tuple[int, int]:
-        simp = trad = 0
-        for t in texts:
-            for c in t:
-                if self.is_simplified_only(c):
-                    simp += 1
-                elif self.is_traditional_only(c):
-                    trad += 1
-        return simp, trad
-
-    def fix(self, text: str) -> str:
-        if not any(self.is_simplified_only(c) for c in text):
-            return text
-        conv = self.s2t.convert(text)  # phrase-aware (e.g. 头发 -> 頭髮)
-        if len(conv) == len(text):
-            return "".join(conv[i] if self.is_simplified_only(c) else c for i, c in enumerate(text))
-        return "".join(self.s2t.convert(c) if self.is_simplified_only(c) else c for c in text)
-
-
-NO_REPAIR_LABELS = {"display_formula", "inline_formula", "formula_number", "algorithm"}
-
-
 def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, dict]:
     """Fix Simplified drift in the block objects of `results` in place.
 
@@ -206,8 +145,7 @@ def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, d
               if b.label not in NO_REPAIR_LABELS]
     simp, trad = rep.survey(b.content for _, _, b in blocks)
     share = simp / (simp + trad) if simp + trad else 0.0
-    # Only act on a clearly Traditional document; Simplified or mixed ones are left alone.
-    is_trad = trad >= 30 and share <= 0.15
+    is_trad = is_traditional(simp, trad)
     info.update(simplified_chars=simp, traditional_chars=trad,
                 document_script="traditional" if is_trad else "not traditional")
     if not is_trad or simp == 0:

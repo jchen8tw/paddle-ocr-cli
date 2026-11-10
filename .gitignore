@@ -6,3 +6,6 @@ output/
 **/*.jpg
 __pycache__
 .venv/
+
+# vendored renderer examples (reference images for the renderer self-check)
+!worker/render/examples/**/*.png
