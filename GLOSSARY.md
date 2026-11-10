@@ -39,6 +39,12 @@ _Avoid_: verifier, scorer, Jev (as a role name)
 The Judge's 0–1 rating of one Reading; higher means more likely correct.
 _Avoid_: confidence, probability
 
+**Verdict**:
+What happened when the Judge was asked to rate one Reading. Only `scored` carries a real Score; the other
+verdicts say the Reading was unusable (`precheck_reject`, `render_error`, `missing_original_image`) or that
+scoring never happened (`encode_error`, `forward_error`).
+_Avoid_: status, result
+
 ### Runs
 
 **Engine**:

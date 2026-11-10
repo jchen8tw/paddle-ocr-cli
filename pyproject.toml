@@ -24,7 +24,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "worker"]
 markers = [
     "gpu: slow end-to-end test that needs the GPU, the models and a sample PDF (PDF_OCR_SAMPLE_PDF)",
 ]

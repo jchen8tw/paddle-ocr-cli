@@ -29,6 +29,12 @@ def read_timeout(max_new_tokens: int) -> float:
     return 120.0 + max_new_tokens / 10.0
 
 
+def score_timeout(n_items: int) -> float:
+    """Seconds to wait for a batch of Judge Scores: Chromium's launch, then ~0.5 s per Reading (0.35 s for the
+    forward and ~0.15 s to render), with a wide margin."""
+    return 120.0 + 5.0 * n_items
+
+
 class WorkerClient:
     def __init__(self, cmd: list[str], *, env: dict | None = None, start_timeout: float = 600.0,
                  max_restarts: int = 3):
@@ -118,6 +124,17 @@ class WorkerClient:
                                "max_new_tokens": max_new_tokens},
                               read_timeout(max_new_tokens) if timeout is None else timeout)
         return reply["readings"]
+
+    def score(self, items: list[dict], *, timeout: float | None = None) -> list[dict]:
+        """Score a batch of Readings: items are {"key", "image" (a PNG path), "text", "category"}; returns one
+        {"key", "verdict", "score", "detail"} per item, in order."""
+        reply = self._request({"op": "score", "items": items},
+                              score_timeout(len(items)) if timeout is None else timeout)
+        return reply["results"]
+
+    def park(self) -> None:
+        """Ask the worker to move the Judge off the GPU (it comes back by itself on the next score)."""
+        self._request({"op": "park"}, 120.0)
 
     def _request(self, req: dict, timeout: float) -> dict:
         if not self.is_alive():

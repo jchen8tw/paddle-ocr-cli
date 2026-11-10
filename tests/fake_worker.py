@@ -35,6 +35,27 @@ class FakeReader:
         return [{"text": f"{Path(image).name}|{prompt}|{max_new_tokens}", "tokens": 1, "finish": "stop"}]
 
 
+class FakeJudge:
+    """The text of an item selects the behaviour: "CRASH" kills the process, "HANG" never answers, "BOOM" raises."""
+
+    def unpark(self):
+        pass
+
+    def park(self):
+        pass
+
+    def score_many(self, items):
+        for i in items:
+            if i["text"] == "CRASH":
+                print("fake worker: CUDA error, crashing", file=sys.stderr, flush=True)
+                os._exit(3)
+            if i["text"] == "HANG":
+                time.sleep(120)
+            if i["text"] == "BOOM":
+                raise RuntimeError("renderer exploded")
+        return [{"key": i["key"], "verdict": "scored", "score": 0.5, "detail": None} for i in items]
+
+
 def main() -> int:
     mode = sys.argv[sys.argv.index("--mode") + 1] if "--mode" in sys.argv else "ready"
     out = sys.stdout
@@ -51,7 +72,7 @@ def main() -> int:
         return 0
     out.write(json.dumps({"event": "ready", "reader": "fake", "versions": {"torch": "0.0"}}) + "\n")
     out.flush()
-    serve_mod.serve(FakeReader(), sys.stdin, out)
+    serve_mod.serve(FakeReader(), sys.stdin, out, FakeJudge())
     return 0
 
 
