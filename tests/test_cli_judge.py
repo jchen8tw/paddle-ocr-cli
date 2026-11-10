@@ -4,7 +4,7 @@ import types
 import pytest
 
 import pdf_ocr
-from block_reader import BlockResult
+from block_reader import BlockResult, Reading
 
 
 def args(*argv):
@@ -166,16 +166,69 @@ def test_the_postprocessing_summary_counts_blocks_verdicts_and_early_judgements(
         (1, (0, 5, 1, 6)): outcome(judged=False),
     }
     assert pdf_ocr.judge_summary(outcomes) == {
-        "blocks_judged": 3, "blocks_below_threshold": 2,
+        "blocks_judged": 3, "blocks_reread": 0, "blocks_below_threshold": 2, "reread_stop_reasons": {},
+        "readings_beyond_the_first": 0,
         "verdicts": {"render_error": 1, "scored": 2}, "blocks_judged_before_script_decision": 1}
 
 
-def test_the_page_line_on_stderr_says_how_many_blocks_are_below_the_threshold():
-    line = pdf_ocr.page_line(2, 21, 4, 13, 7.04, summary={"judged": 9, "below_threshold": 3, "not_scored": 1}, recovered=0)
-    assert line == "[  2/21] page 4: 13 blocks, 7.0s, 3 of 9 judged below the threshold (1 not scored)"
+def test_the_postprocessing_summary_reports_re_read_blocks_and_those_still_below_the_threshold():
+    r = lambda text, rnd, score, dup=0: Reading(text, rnd, "greedy", None, 1.0, "scored", score, duplicates=dup)
+    outcomes = {
+        (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False),     # passed at once
+        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False,
+                                   readings=[r("a", 1, 0.5), r("b", 2, 0.99)], stop_reason="passed"),
+        (1, (0, 0, 1, 1)): outcome(judged=True, score=0.7, verdict="scored", below_threshold=True, stop_reason="exhausted",
+                                   readings=[r("a", 1, 0.5, dup=2), r("b", 3, 0.7)]),
+    }
+    summary = pdf_ocr.judge_summary(outcomes)
+    assert (summary["blocks_judged"], summary["blocks_reread"], summary["blocks_below_threshold"]) == (3, 2, 1)
+    assert summary["reread_stop_reasons"] == {"exhausted": 1, "passed": 1}
+    assert summary["readings_beyond_the_first"] == 1 + 3
+
+
+def test_the_page_line_on_stderr_reports_blocks_below_the_threshold_and_blocks_re_read():
+    line = pdf_ocr.page_line(2, 21, 4, 13, 7.04, summary={"judged": 9, "reread": 5, "below_threshold": 3, "not_scored": 1}, recovered=0)
+    assert line == "[  2/21] page 4: 13 blocks, 7.0s, 3 of 9 judged below the threshold, 5 re-read (1 not scored)"
     plain = pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary=None, recovered=2)
     assert plain == "[  1/2] page 1: 5 blocks, 1.0s, re-read 2 short block(s)"
-    assert "below" in pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary={"judged": 5, "below_threshold": 0, "not_scored": 0}, recovered=0)
+    assert "0 re-read" in pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary={"judged": 5, "reread": 0, "below_threshold": 0, "not_scored": 0}, recovered=0)
+
+
+# --- a re-read Block in the JSON ----------------------------------------------------------------------------
+
+def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_reading_stopped():
+    readings = [Reading("你好", 1, "greedy", None, 1.0, "scored", 0.4, duplicates=1),
+                Reading("你號", 3, "temperature", 0.3, 1.0, "scored", 0.93),
+                Reading("x", 4, "temperature", 0.7, 1.0, "render_error", None, "render_failed")]
+    o = outcome(text="你號", judged=True, score=0.93, verdict="scored", below_threshold=True, readings=readings,
+                stop_reason="exhausted", skipped_rounds=[{"round": 2, "reason": "r"}])
+    (b,) = page([block(block_content="你號")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    assert (b["content"], b["score"], b["stop_reason"]) == ("你號", 0.93, "exhausted")
+    assert b["readings"] == [
+        {"content": "你好", "score": 0.4, "verdict": "scored", "round": 1, "decode": "greedy", "temperature": None,
+         "scale": 1.0, "duplicates": 1},
+        {"content": "你號", "score": 0.93, "verdict": "scored", "round": 3, "decode": "temperature", "temperature": 0.3,
+         "scale": 1.0},
+        {"content": "x", "score": None, "verdict": "render_error", "round": 4, "decode": "temperature",
+         "temperature": 0.7, "scale": 1.0, "verdict_detail": "render_failed"}]
+    assert b["skipped_rounds"] == [{"round": 2, "reason": "r"}]
+
+
+def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rounds():
+    o = outcome(judged=True, score=0.99, verdict="scored", below_threshold=False)
+    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    assert not {"readings", "stop_reason", "stop_detail", "skipped_rounds"} & b.keys()
+
+
+def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
+    s = pdf_ocr.settings_info(args())
+    assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
+        (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
+    assert "supported" not in s["reread_schedule"][0] and s["max_readings_per_block"] == 10
+    bridge = types.SimpleNamespace(supports=lambda step: step.decode == "greedy")
+    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"), bridge)["reread_schedule"]] == [
+        True, True, False, False]
+    assert "reread_schedule" not in pdf_ocr.settings_info(args("--no-judge"))
 
 
 # --- a run that ran out of GPU memory says what to do ---------------------------------------------------

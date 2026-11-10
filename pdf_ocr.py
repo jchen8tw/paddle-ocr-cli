@@ -28,6 +28,7 @@ import warnings
 from html.parser import HTMLParser
 from pathlib import Path
 
+import block_reader
 from script_repair import NO_REPAIR_LABELS, ScriptRepair, is_traditional
 
 ROOT = Path(__file__).resolve().parent
@@ -319,7 +320,7 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(args, pipe, stack, ink):
+def attach_worker(args, pipe, stack, ink, doc_hash: str):
     """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
@@ -349,7 +350,8 @@ def attach_worker(args, pipe, stack, ink):
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair)
+    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair,
+                  doc_hash=doc_hash)
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
             paddle_model, client, tmp_dir, before_read=client.park if judge else None,
@@ -582,6 +584,24 @@ def add_judge_fields(block: dict, outcome) -> None:
         block["judged_before_script_decision"] = True  # judged before the document was known to be Traditional
     if outcome.text != block["content"]:
         block["judged_text"] = outcome.text  # the Score describes this text, not the one written above
+    if outcome.readings is not None:  # the Block was re-read: content/score/verdict above are the winning Reading's
+        block["stop_reason"] = outcome.stop_reason
+        if outcome.stop_detail:
+            block["stop_detail"] = outcome.stop_detail
+        block["readings"] = [reading_json(r) for r in outcome.readings]
+        if outcome.skipped_rounds:
+            block["skipped_rounds"] = outcome.skipped_rounds
+
+
+def reading_json(r) -> dict:
+    """One Reading of a re-read Block: its text, Score and verdict, and how it was produced."""
+    d = {"content": r.text, "score": None if r.score is None else round(r.score, 6), "verdict": r.verdict,
+         "round": r.round, "decode": r.decode, "temperature": r.temperature, "scale": r.scale}
+    if r.detail and r.verdict != "scored":
+        d["verdict_detail"] = r.detail
+    if r.duplicates:
+        d["duplicates"] = r.duplicates  # later Readings with this very text, not scored again
+    return d
 
 
 def undo_sticky_repair(ok: list[tuple[int, object]], outcomes: dict) -> int:
@@ -599,13 +619,21 @@ def undo_sticky_repair(ok: list[tuple[int, object]], outcomes: dict) -> int:
 
 
 def judge_summary(outcomes: dict) -> dict:
-    """The JSON `postprocessing.judge` section: how many Blocks were judged, flagged, and with which verdicts."""
+    """The JSON `postprocessing.judge` section: how many Blocks were judged, re-read and still flagged (below the
+    threshold after re-reading), and with which verdicts."""
     judged = [o for o in outcomes.values() if o.judged]
     verdicts: dict[str, int] = {}
     for o in judged:
         verdicts[o.verdict] = verdicts.get(o.verdict, 0) + 1
+    reread = [o for o in judged if o.readings is not None]
+    stops: dict[str, int] = {}
+    for o in reread:
+        stops[o.stop_reason] = stops.get(o.stop_reason, 0) + 1
     return {"blocks_judged": len(judged),
-            "blocks_below_threshold": sum(1 for o in judged if o.below_threshold),
+            "blocks_reread": len(reread),
+            "blocks_below_threshold": sum(1 for o in judged if o.below_threshold),  # after re-reading
+            "reread_stop_reasons": dict(sorted(stops.items())),
+            "readings_beyond_the_first": sum(sum(1 + r.duplicates for r in o.readings) - 1 for o in reread),
             "verdicts": dict(sorted(verdicts.items())),
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
@@ -625,7 +653,8 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
     """One progress line on stderr."""
     line = f"[{n:>3}/{total}] page {page_no}: {n_blocks} blocks, {seconds:.1f}s"
     if summary is not None:
-        line += f", {summary['below_threshold']} of {summary['judged']} judged below the threshold"
+        line += (f", {summary['below_threshold']} of {summary['judged']} judged below the threshold, "
+                 f"{summary['reread']} re-read")
         if summary["not_scored"]:
             line += f" ({summary['not_scored']} not scored)"
     if recovered:
@@ -633,12 +662,20 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
     return line
 
 
-def settings_info(args) -> dict:
+def reread_schedule_info(supports) -> list[dict]:
+    """The re-read schedule for the JSON `settings`, with whether the Reader of this run can do each round."""
+    return [{"round": s.round, "decode": s.decode, "temperature": s.temperature, "scale": s.scale, "samples": s.samples,
+             **({} if supports is None else {"supported": bool(supports(s))})} for s in block_reader.SCHEDULE]
+
+
+def settings_info(args, bridge=None) -> dict:
     """The JSON `settings` section."""
     return {
         "reader": args.reader,
         "judge": not args.no_judge,
         "judge_threshold": None if args.no_judge else args.judge_threshold,
+        **({} if args.no_judge else {"reread_schedule": reread_schedule_info(bridge.supports if bridge else None),
+                                     "max_readings_per_block": block_reader.MAX_READINGS}),
         "dpi": args.dpi,
         "layout_threshold": args.layout_threshold,
         "max_new_tokens": args.max_new_tokens,
@@ -876,6 +913,7 @@ def _transcribe(args, stack) -> int:
 
     out_dir = args.output_dir or Path("output") / args.pdf.stem
     out_dir.mkdir(parents=True, exist_ok=True)
+    doc_hash = hashlib.sha256(args.pdf.read_bytes()).hexdigest()  # also seeds the sampling of the re-reads
 
     device = pick_device(args.device)
     t_start = time.time()
@@ -884,7 +922,7 @@ def _transcribe(args, stack) -> int:
     bridge = ready = None
     ink = InkReread()
     if needs_worker(args):
-        bridge, ready = attach_worker(args, pipe, stack, ink)
+        bridge, ready = attach_worker(args, pipe, stack, ink, doc_hash)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
 
     ok: list[tuple[int, object]] = []
@@ -950,13 +988,13 @@ def _transcribe(args, stack) -> int:
     doc = {
         "source": {
             "file": args.pdf.name,
-            "sha256": hashlib.sha256(args.pdf.read_bytes()).hexdigest(),
+            "sha256": doc_hash,
             "page_count": total,
             "pages_processed": [i + 1 for i in indices],
             "pages_failed": [i + 1 for i in sorted(errors)],
         },
         "engine": engine_info(args, device, ready),
-        "settings": settings_info(args),
+        "settings": settings_info(args, bridge),
         "postprocessing": {
             "tables_with_line_breaks_fixed": tables_fixed,
             **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
