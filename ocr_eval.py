@@ -4,7 +4,7 @@ The PDF's characters are assigned to the layout Blocks by position (a character 
 smallest Block whose box contains its centre), so the order of the Blocks never matters. Each Block's
 Reading is then compared with the characters assigned to it by edit distance. Characters the layout
 model never covered count as errors ("missed"). Blocks that are not read by default (figures, charts,
-seals) are left out of the score ("skipped").
+seals) and display formulas (LaTeX against typeset glyphs) are left out of the score ("skipped").
 
 Standalone use, on a finished run (the PDF is needed again for its text layer):
 
@@ -24,7 +24,14 @@ from typing import NamedTuple
 
 # Blocks whose content is not comparable with the text layer, or not read unless asked for.
 UNREAD_LABELS = frozenset({"image", "chart", "seal", "header_image", "footer_image"})
+# Display formulas are read as LaTeX, while the text layer holds the typeset glyphs in drawing order, so the two
+# cannot be compared character by character. Inline formulas inside a text Block stay scored.
+UNCOMPARABLE_LABELS = frozenset({"display_formula"})
+SKIPPED_LABELS = UNREAD_LABELS | UNCOMPARABLE_LABELS
 _TAG = re.compile(r"<[^>]*>")
+# The dash glyph a typesetter draws and the one a Reader writes differ for no reason the page shows (a text layer
+# with U+FF0D, a Reader writing an em dash); NFKC already folds U+FF0D and U+FE63 into a hyphen.
+_DASHES = str.maketrans({c: "-" for c in "\u2012\u2013\u2014\u2015\u2212"})
 _LEADER = re.compile(r"\.{3,}")  # table-of-contents dot leaders; their length is typesetting, not text
 
 
@@ -51,7 +58,7 @@ class Tally:
 @dataclass
 class PageScore(Tally):
     missed_chars: int = 0   # text-layer characters inside no Block (counted as errors)
-    skipped_chars: int = 0  # text-layer characters inside unread Blocks (not scored)
+    skipped_chars: int = 0  # text-layer characters inside unread or uncomparable Blocks (not scored)
     by_label: dict[str, Tally] = field(default_factory=dict)
 
 
@@ -67,10 +74,10 @@ class DocScore:
 
 def normalize(text: str, *, html_markup: bool = False) -> str:
     """Drop what the comparison should not depend on: markup, whitespace, full/half-width forms,
-    dot leaders (a run of 3+ dots)."""
+    the kind of dash (hyphen, en dash, em dash, minus, full-width hyphen), dot leaders (a run of 3+ dots)."""
     if html_markup:
         text = html.unescape(_TAG.sub("", text))
-    text = _LEADER.sub("", unicodedata.normalize("NFKC", text))
+    text = _LEADER.sub("", unicodedata.normalize("NFKC", text).translate(_DASHES))
     return "".join(c for c in text if unicodedata.category(c)[0] not in "ZC")
 
 
@@ -111,7 +118,7 @@ def score_page(blocks: list[dict], text_chars: list[TextChar], scale: float) -> 
     for i, b in enumerate(blocks):
         label = b["label"]
         ref = normalize("".join(assigned[i]))
-        if label in UNREAD_LABELS:
+        if label in SKIPPED_LABELS:
             page.skipped_chars += len(ref)
             continue
         hyp = normalize(b["content"], html_markup=label == "table")
@@ -181,7 +188,7 @@ def format_report(score: DocScore) -> str:
     lines += [row(label, t) for label, t in sorted(score.by_label.items())]
     lines += ["", row("total", score.total),
               f"  of which {score.missed_chars} text-layer chars lie in no Block (layout misses); "
-              f"{score.skipped_chars} chars inside unread Blocks (figures, charts, seals) are not scored"]
+              f"{score.skipped_chars} chars inside unread or uncomparable Blocks (figures, charts, seals, display formulas) are not scored"]
     if score.skipped_pages:
         lines.append(f"  pages not scored (failed or no text layer): {score.skipped_pages}")
     return "\n".join(lines)
