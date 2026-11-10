@@ -108,13 +108,19 @@ is one CSV, and `--no-merge-tables` gives one CSV per page part.
   table is reported on stderr and listed in `csv_tables.skipped` in the JSON, with the reason.
 - **Merged cells** (`rowspan` / `colspan`) are expanded by repeating the cell text in every cell they
   cover. Every row then has every value, which suits filtering and pivoting.
+- **Side-by-side panels are stacked.** A long two-column table is often printed as several panels on a
+  page, so its header repeats (年度 | 係數 | 年度 | 係數 | 年度 | 係數). Left as is, that header has
+  duplicate column names, and anything that keys rows by name (`csv.DictReader`, most converters and
+  importers) keeps only the last panel. When the first row is an exact repeat of a header whose cells
+  are all different, the panels are stacked one after another into a single table, and dash or empty
+  rows that pad the end of a panel are dropped. The Markdown and the JSON keep the printed layout.
 - **Cell text:** `<br>` becomes a line break inside the cell, HTML entities are decoded and other
   whitespace is collapsed.
 - **Encoding:** UTF-8 with a BOM, so Excel opens CJK text correctly.
 - **Re-runs:** a run into the same folder first deletes the old `pNNN_tableKK.csv` files there. Other
   files in `csv/` are left alone.
 - **JSON entries:** `csv_tables.exported` lists each file with its first page, block id, all the pages
-  it covers, and its row and column counts.
+  it covers, and its row and column counts (plus `panels` when side-by-side panels were stacked).
 
 On the sample PDF, all 11 table blocks were valid and became 6 CSVs, because two tables run across
 several pages. One is the drug list on pages 14–16 (93 rows). The other is the ICD-10 code table on

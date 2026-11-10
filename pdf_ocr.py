@@ -518,10 +518,39 @@ def table_to_grid(html: str) -> list[list[str]]:
     return [[grid[(r, c)] for c in range(widths[0])] for r in range(n_rows)]
 
 
+FILLER_CELLS = {"", "-", "--", "—", "–"}
+
+
+def unwrap_panels(grid: list[list[str]]) -> tuple[list[list[str]], int]:
+    """Stack a long table that was typeset as side-by-side panels back into one table.
+
+    Such a page repeats its header (年度 | 係數 | 年度 | 係數 | 年度 | 係數). As a CSV that header has
+    duplicate column names, and readers that key rows by name (csv.DictReader, most converters and
+    importers) keep only the last panel. Returns (grid, panel count); the grid is returned unchanged
+    unless the first row is an exact repeat of a header whose cells are all different. Filler rows
+    (empty or dashes) that pad the end of a panel are dropped.
+    """
+    header, n = grid[0], len(grid[0])
+    for k in range(2, n // 2 + 1):
+        panel = header[:k]
+        if n % k == 0 and header == panel * (n // k) and len(set(panel)) == k and any(panel):
+            break
+    else:
+        return grid, 1
+    stacked = [panel]
+    for p in range(n // k):
+        rows = [row[p * k:(p + 1) * k] for row in grid[1:]]
+        while rows and all(c in FILLER_CELLS for c in rows[-1]):
+            rows.pop()
+        stacked.extend(rows)
+    return stacked, n // k
+
+
 def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_dir: Path) -> dict:
     """Write each valid table block as csv/pNNN_tableKK.csv (UTF-8 with BOM, so Excel reads CJK text).
 
-    Uses the same results as the Markdown, so a table merged across a page break becomes one CSV.
+    Uses the same results as the Markdown, so a table merged across a page break becomes one CSV, and a
+    table printed as side-by-side panels is stacked into one (see unwrap_panels).
     Returns the summary stored in the JSON.
     """
     if csv_dir.is_dir():  # drop CSVs of an earlier run into the same folder; other files are left alone
@@ -549,11 +578,14 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
                 skipped.append({**entry, "reason": str(e)})
                 last = skipped[-1]
                 continue
+            grid, panels = unwrap_panels(grid)
             name = f"p{idx + 1:03d}_table{k:02d}.csv"
             csv_dir.mkdir(parents=True, exist_ok=True)
             with open(csv_dir / name, "w", encoding="utf-8-sig", newline="") as f:
                 csv.writer(f).writerows(grid)
             entry.update(file=f"{csv_dir.name}/{name}", rows=len(grid), columns=len(grid[0]))
+            if panels > 1:
+                entry["panels"] = panels
             exported.append(entry)
     for s in skipped:
         print(f"warning: table on page {s['page']} (block {s['block_id']}) not exported to CSV: {s['reason']}",
