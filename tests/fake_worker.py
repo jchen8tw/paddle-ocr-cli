@@ -20,6 +20,11 @@ spec.loader.exec_module(serve_mod)
 
 class FakeReader:
     def read(self, image, prompt, max_new_tokens):
+        marker = os.environ.get("FAKE_CRASH_ONCE")  # crash on the first read of the first process only
+        if marker and not Path(marker).exists():
+            Path(marker).write_text("crashed")
+            print("fake worker: CUDA error, crashing", file=sys.stderr, flush=True)
+            os._exit(3)
         if prompt == "CRASH":
             print("fake worker: about to crash (CUDA error)", file=sys.stderr, flush=True)
             os._exit(3)

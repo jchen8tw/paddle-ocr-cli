@@ -1,6 +1,8 @@
 """End-to-end: run the CLI on a few pages of a real-text-layer PDF (slow; GPU + models + PDF needed).
 
-Skipped cleanly when PDF_OCR_SAMPLE_PDF is not set (see conftest.py).
+Skipped cleanly when PDF_OCR_SAMPLE_PDF is not set (see conftest.py). Every test runs once per Reader
+(MiniCPM-OCR-1.0 through the torch worker, and PaddleOCR-VL-1.6), against the same expectations: the
+two Readers must produce the same structure.
 """
 import json
 import warnings
@@ -20,19 +22,24 @@ def load(out: Path, pdf: Path) -> tuple[str, dict]:
     return md, doc
 
 
-def test_output_structure(cli_runs, sample_pdf, pages):
+def test_output_structure(cli_runs, sample_pdf, pages, reader):
     out = cli_runs[0]
     md, doc = load(out, sample_pdf)
 
     assert md.strip()
-    assert {"source", "engine", "settings", "pages"} <= doc.keys()
+    assert {"source", "engine", "settings", "postprocessing", "csv_tables", "elapsed_seconds", "pages"} == doc.keys()
+    assert doc["settings"]["reader"] == reader
+    assert doc["engine"]["layout_model"] == "PP-DocLayoutV3"
+    assert doc["engine"]["reader"] == {"minicpm": "MiniCPM-OCR-1.0", "paddle": "PaddleOCR-VL-1.6"}[reader]
+    assert ("torch" in doc["engine"] and "transformers" in doc["engine"]) == (reader == "minicpm")
+    assert {"tables_with_line_breaks_fixed", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []
     assert len(doc["pages"]) == len(doc["source"]["pages_processed"]) > 0
     for page in doc["pages"]:
         assert page["blocks"], f"page {page['page']} has no blocks"
         for b in page["blocks"]:
-            assert {"id", "order", "label", "content", "bbox"} <= b.keys()
+            assert {"id", "order", "label", "content", "bbox", "polygon", "in_markdown"} <= b.keys()
 
     has_table = any(b["label"] == "table" for p in doc["pages"] for b in p["blocks"])
     if has_table:

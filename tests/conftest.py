@@ -6,6 +6,10 @@ The sample PDF is gitignored, so it comes from outside:
     PDF_OCR_PAGES=1-3                                           # pages to run (default: "pages" in tests/baseline.json)
     PDF_OCR_MODELS_DIR=/path/to/models                          # default: ./models
     PDF_OCR_CER_BOUND=0.01                                      # overrides tests/baseline.json
+    PDF_OCR_READERS=minicpm                                     # readers to run (default: minicpm,paddle)
+    PDF_OCR_WORKER_ENV=/path/to/worker-venv                     # worker environment (default: worker/.venv)
+
+The end-to-end tests run once per Reader; a Reader whose model folder or environment is missing is skipped.
 """
 import importlib.util
 import json
@@ -35,15 +39,39 @@ def sample_pdf() -> Path:
     return pdf
 
 
-@pytest.fixture(scope="session")
-def models_dir() -> Path:
+READERS = os.environ.get("PDF_OCR_READERS", "minicpm,paddle").split(",")
+READER_DIRS = {"minicpm": "MiniCPM-OCR-1.0", "paddle": "PaddleOCR-VL-1.6"}
+
+
+def _models_dir(*folders: str) -> Path:
     d = Path(os.environ.get("PDF_OCR_MODELS_DIR", ROOT / "models"))
-    for name in ("PP-DocLayoutV3", "PaddleOCR-VL-1.6"):
+    for name in folders:
         if not (d / name).is_dir():
             pytest.skip(f"model folder missing: {d / name}")
     if importlib.util.find_spec("paddle") is None:
         pytest.skip("paddle is not installed in this environment (run pytest from the project venv)")
     return d
+
+
+@pytest.fixture(scope="session")
+def layout_models_dir() -> Path:
+    """For tests that need only the Layout model (the Reader is faked)."""
+    return _models_dir("PP-DocLayoutV3")
+
+
+@pytest.fixture(scope="session", params=READERS)
+def reader(request) -> str:
+    if request.param == "minicpm":
+        import pdf_ocr
+
+        if problem := pdf_ocr.worker_env_problem():
+            pytest.skip(problem)
+    return request.param
+
+
+@pytest.fixture(scope="session")
+def models_dir(reader) -> Path:
+    return _models_dir("PP-DocLayoutV3", READER_DIRS[reader])
 
 
 @pytest.fixture(scope="session")
@@ -58,21 +86,22 @@ def cer_bound() -> float:
     return float(BASELINE["cer_bound"])
 
 
-def run_cli(pdf: Path, out_dir: Path, models_dir: Path, pages: str) -> subprocess.CompletedProcess:
+def run_cli(pdf: Path, out_dir: Path, models_dir: Path, pages: str, reader: str = "minicpm",
+            *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(ROOT / "pdf_ocr.py"), str(pdf), "-o", str(out_dir),
-         "--models-dir", str(models_dir), "--pages", pages],
+         "--models-dir", str(models_dir), "--pages", pages, "--reader", reader, *extra],
         capture_output=True, text=True, cwd=ROOT,
     )
 
 
 @pytest.fixture(scope="session")
-def cli_runs(sample_pdf, models_dir, pages, tmp_path_factory) -> list[Path]:
-    """Output folders of two identical runs of the CLI on the sample (shared by all e2e tests)."""
+def cli_runs(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> list[Path]:
+    """Output folders of two identical runs of the CLI on the sample (shared by all e2e tests of a Reader)."""
     outs = []
     for i in (1, 2):
-        out = tmp_path_factory.mktemp(f"run{i}")
-        done = run_cli(sample_pdf, out, models_dir, pages)
-        assert done.returncode == 0, f"CLI run {i} failed:\n{done.stderr[-2000:]}"
+        out = tmp_path_factory.mktemp(f"{reader}_run{i}")
+        done = run_cli(sample_pdf, out, models_dir, pages, reader)
+        assert done.returncode == 0, f"CLI run {i} ({reader}) failed:\n{done.stderr[-2000:]}"
         outs.append(out)
     return outs

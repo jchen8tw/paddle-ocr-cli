@@ -9,27 +9,8 @@ import numpy as np
 import pytest
 
 from reader_bridge import BlockQuery, HookUnsupported, MiniCPMBridge, check_hook_support, install_reader_hook
+from fakes import FakeClient
 from worker_client import WorkerError
-
-
-class FakeClient:
-    """Records what the bridge asks the worker for."""
-
-    def __init__(self, texts=None, fail_on=None):
-        self.calls, self.texts, self.fail_on = [], texts or {}, fail_on
-        self.started = 0
-
-    def ensure_started(self):
-        self.started += 1
-
-    def read(self, image, prompt, max_new_tokens, *, timeout=None):
-        from pathlib import Path
-
-        assert Path(image).is_file(), "the crop must exist on disk while the worker reads it"
-        self.calls.append((prompt, max_new_tokens))
-        if self.fail_on == prompt:
-            raise WorkerError("the worker stopped (exited with code 3)")
-        return [{"text": self.texts.get(prompt, f"text for {prompt}"), "tokens": 5, "finish": "stop"}]
 
 
 def query(text, label):

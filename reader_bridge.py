@@ -21,7 +21,7 @@ from pathlib import Path
 import minicpm_reader
 
 COLLECT = "_paddleocr_vl_collect_page_vlm_entries_core"
-COLLECT_PARAMS = ["page_idx", "blocks_for_img", "imgs_in_doc", "cfg"]
+COLLECT_ARITY = 4  # (page_idx, blocks_for_img, imgs_in_doc_for_img, layout_prep_cfg); the hook passes them positionally
 ENTRY_LEN = 6  # (page_in_batch, block_index, image, query, pixel_budget, figure_info)
 
 # The pipeline's query strings, for a query that arrives without its label.
@@ -72,8 +72,8 @@ def check_hook_support(pipe) -> None:
         problems.append(f"`{COLLECT}` is missing")
     else:
         names = list(inspect.signature(method).parameters)
-        if names != COLLECT_PARAMS:
-            problems.append(f"`{COLLECT}` has signature {names}, expected {COLLECT_PARAMS}")
+        if len(names) != COLLECT_ARITY:
+            problems.append(f"`{COLLECT}` has signature {names}, expected {COLLECT_ARITY} parameters")
     if problems:
         raise HookUnsupported(
             f"the installed PaddleX ({_versions()}) is not compatible with the MiniCPM Reader hook: "
