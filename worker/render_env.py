@@ -40,7 +40,7 @@ RENDERING_RULES = """\
 
 
 def default_fc_list() -> str:
-    return subprocess.run(["fc-list", "Noto Sans CJK", "file", "family"], capture_output=True, text=True,
+    return subprocess.run(["fc-list", ":", "file", "family"], capture_output=True, text=True,
                           check=True).stdout
 
 
@@ -123,6 +123,8 @@ def write_fontconfig(work_dir: Path, droid_dir: Path, noto_files: list[Path], ca
 def prepare_environment() -> None:
     """Point the renderer's Chromium at the private fontconfig. Call once, before the first render."""
     noto = noto_sans_cjk_files(default_fc_list())
+    if not noto:  # setup_problems() reports this first; never render with the wrong font silently
+        raise RuntimeError("Noto Sans CJK is not installed")
     cache = font_cache_dir()
     conf = write_fontconfig(cache.parent / "conf", DROID_DIR, noto, cache)
     os.environ["FONTCONFIG_FILE"] = str(conf)

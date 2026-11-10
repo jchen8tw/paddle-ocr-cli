@@ -80,17 +80,31 @@ def truncate_repetitive_content(content: str, min_count: int = 50) -> str:
     return content
 
 
-def clean_reading(raw: str, label: str, *, to_html) -> tuple[str, bool]:
-    """Clean one raw MiniCPM Reading. Returns (text, whether a repetition loop was cut).
+def rewrite_latex_delimiters(text: str, label: str) -> str:
+    """PaddleX's rewrite of `\\( \\)` and `\\[ \\]` into ` $ ... $ ` and ` $$ ... $$ `, done by the pipeline after
+    the Reader returns. Done here too, before judging, so that the Score describes the text that is written;
+    the pipeline's own pass then finds nothing left to do."""
+    if not (("\\(" in text and "\\)" in text) or ("\\[" in text and "\\]" in text)):
+        return text
+    text = text.replace("$", "")
+    text = (text.replace("\\(", " $ ").replace("\\)", " $").replace("\\[\\[", "\\[").replace("\\]\\]", "\\]")
+            .replace("\\[", " $$ ").replace("\\]", " $$ "))
+    return text.replace("$", "") if label == "formula_number" else text
 
-    Order: repetition cut, OTSL to HTML (tables), in-cell line breaks to <br> (tables). The
-    Simplified to Traditional repair is document-level and runs after all pages (pdf_ocr.repair_script).
-    `to_html` is PaddleX's convert_otsl_to_html, which returns "" for text that is not OTSL.
+
+def clean_reading(raw: str, label: str, *, to_html, strip: bool = True) -> tuple[str, bool]:
+    """Clean one raw Reading (MiniCPM's, or PaddleOCR-VL's with strip=False). Returns (text, whether a
+    repetition loop was cut).
+
+    Order: repetition cut, math delimiters (the pipeline does both next anyway), OTSL to HTML (tables),
+    in-cell line breaks to <br> (tables). The Simplified to Traditional repair is not here: it needs the
+    document (script_repair.py). `to_html` is PaddleX's convert_otsl_to_html, which returns "" for text that
+    is not OTSL.
     """
-    text = raw.strip()
+    text = raw.strip() if strip else raw
     cut = truncate_repetitive_content(text, min_count=5000 if label == "table" else 50)
     was_cut = cut != text
-    text = cut
+    text = rewrite_latex_delimiters(cut, label)
     if label == "table":
         html = to_html(text)
         if html:

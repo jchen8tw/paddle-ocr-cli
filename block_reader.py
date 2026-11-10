@@ -51,6 +51,7 @@ class BlockRequest:
     image: Any
     label: str
     bbox: tuple | None = None
+    payload: Any = None  # whatever the Reader adapter needs besides the above (the pipeline's query string)
 
 
 @dataclass
