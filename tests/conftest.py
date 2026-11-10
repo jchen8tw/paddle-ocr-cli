@@ -3,7 +3,7 @@
 The sample PDF is gitignored, so it comes from outside:
 
     PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf pytest -m gpu        # 21-page Traditional Chinese policy
-    PDF_OCR_PAGES=1-3                                           # pages to run (default 1-3)
+    PDF_OCR_PAGES=1-3                                           # pages to run (default: "pages" in tests/baseline.json)
     PDF_OCR_MODELS_DIR=/path/to/models                          # default: ./models
     PDF_OCR_CER_BOUND=0.01                                      # overrides tests/baseline.json
 """
@@ -48,7 +48,7 @@ def models_dir() -> Path:
 
 @pytest.fixture(scope="session")
 def pages() -> str:
-    return os.environ.get("PDF_OCR_PAGES", "1-3")
+    return os.environ.get("PDF_OCR_PAGES", BASELINE["pages"])
 
 
 @pytest.fixture(scope="session")

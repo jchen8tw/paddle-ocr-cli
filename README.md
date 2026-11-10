@@ -197,7 +197,7 @@ PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf uv run pytest          # also run the CLI
 The end-to-end tests (`tests/test_e2e.py`, marker `gpu`) run the CLI twice on a PDF that has a real text
 layer. They check the output structure, that the character error rate against the text layer stays at or
 below the bound in `tests/baseline.json`, and that both runs give identical Markdown and JSON.
-`PDF_OCR_PAGES` (default `1-3`), `PDF_OCR_MODELS_DIR` and `PDF_OCR_CER_BOUND` override the pages, the
+`PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, now `1-3`), `PDF_OCR_MODELS_DIR` and `PDF_OCR_CER_BOUND` override the pages, the
 models folder and the bound.
 
 `ocr_eval.py` is the error-rate harness. The PDF's characters are assigned to Blocks by position, so
@@ -212,4 +212,6 @@ Text-layer characters that lie in no Block count as errors; figures, charts and 
 whitespace, HTML markup, full/half-width forms and table-of-contents dot leaders are ignored.
 
 The bound in `tests/baseline.json` is currently a **placeholder** (5 %), not a measurement. The baseline
-of PaddleOCR-VL-1.6 on the 21-page sample, measured with this harness, still has to be recorded there.
+of PaddleOCR-VL-1.6 on the 21-page sample still has to be measured with `ocr_eval.py` and recorded there,
+on exactly the pages in `baseline.json` (the 0.40 % above came from an earlier throwaway harness with
+different normalisation and the whole document, so it is not this tool's baseline).

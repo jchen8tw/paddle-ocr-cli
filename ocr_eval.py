@@ -155,9 +155,13 @@ def extract_text_layers(pdf_path: Path, pages: list[int]) -> dict[int, list[Text
             height = page.get_height()
             tp = page.get_textpage()
             chars = []
-            for i, ch in enumerate(tp.get_text_range(0, tp.count_chars())):
+            i = 0  # index into pdfium's UTF-16 character array; a non-BMP character takes two slots
+            for ch in tp.get_text_range(0, tp.count_chars()):
                 left, bottom, right, top = tp.get_charbox(i)
                 chars.append(TextChar(ch, (left + right) / 2, height - (bottom + top) / 2))
+                i += 2 if ord(ch) > 0xFFFF else 1
+            if i != tp.count_chars():
+                raise RuntimeError(f'page {n}: text layer has {tp.count_chars()} slots but {i} were read')
             layers[n] = chars
             tp.close()
             page.close()

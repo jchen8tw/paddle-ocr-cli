@@ -1,6 +1,7 @@
 {
   "_comment": "Bound for the end-to-end character-error-rate check (tests/test_e2e.py). While bound_is_placeholder is true, cer_bound is NOT a measurement: it is a loose sanity ceiling. To record the real baseline, run the CLI on the sample PDF, run `python ocr_eval.py <pdf>`, then set cer_bound slightly above the measured total CER, set bound_is_placeholder to false and fill in `measured`.",
   "bound_is_placeholder": true,
+  "pages": "1-3",
   "cer_bound": 0.05,
   "measured": null,
   "harness_smoke_test_on_substitute_pdf": {
