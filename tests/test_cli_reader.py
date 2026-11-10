@@ -20,8 +20,8 @@ def test_minicpm_is_the_default_reader_and_paddle_can_be_chosen():
 
 
 def test_each_reader_requires_only_its_own_model_folders():
-    assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
-    assert pdf_ocr.required_model_dirs(args("--reader", "paddle")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
+    assert pdf_ocr.required_model_dirs(args("--no-judge")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
+    assert pdf_ocr.required_model_dirs(args("--reader", "paddle", "--no-judge")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
 
 
 def test_check_models_names_every_missing_folder(tmp_path):
@@ -33,7 +33,7 @@ def test_check_models_names_every_missing_folder(tmp_path):
 def test_paddle_reader_does_not_need_the_minicpm_folder(tmp_path):
     for name in ("PP-DocLayoutV3", "PaddleOCR-VL-1.6"):
         (tmp_path / name).mkdir()
-    assert pdf_ocr.missing_models_message(args("--reader", "paddle", "--models-dir", str(tmp_path))) is None
+    assert pdf_ocr.missing_models_message(args("--reader", "paddle", "--no-judge", "--models-dir", str(tmp_path))) is None
     assert "MiniCPM-OCR-1.0" in pdf_ocr.missing_models_message(args("--models-dir", str(tmp_path)))
 
 

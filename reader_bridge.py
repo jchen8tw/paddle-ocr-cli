@@ -63,6 +63,11 @@ def _inner(pipe):
             "Use --reader paddle, or `uv sync` to restore the pinned versions.") from None
 
 
+def original_vl_model(pipe):
+    """The pipeline's own VL model (PaddleOCR-VL), before a bridge replaces it."""
+    return _inner(pipe).vl_rec_model
+
+
 def check_hook_support(pipe) -> None:
     """Raise HookUnsupported unless the private names the hook uses are where it expects them."""
     inner = _inner(pipe)

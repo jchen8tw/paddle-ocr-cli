@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
 VL_MODEL_DIR = "PaddleOCR-VL-1.6"
 MINICPM_MODEL_DIR = "MiniCPM-OCR-1.0"
+JUDGE_MODEL_DIR = "MiniCPM-OCR-Jev"
 READER_MODEL_DIRS = {"minicpm": MINICPM_MODEL_DIR, "paddle": VL_MODEL_DIR}
 WORKER_DIR = ROOT / "worker"  # second uv project: torch + transformers (docs/adr/0001)
 
@@ -80,8 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="read text on seals/stamps (off by default; otherwise saved as an image)")
     g.add_argument("--ocr-images", action="store_true", help="also OCR text inside figure/image blocks")
     g.add_argument("--no-merge-blocks", action="store_true", help="do not merge adjacent text blocks before OCR")
+    g.add_argument("--no-judge", action="store_true",
+                   help="do not score blocks with the MiniCPM-OCR Jev Judge (needs the worker environment, Chromium, "
+                        "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
+                        "ink-based re-read of implausibly short blocks runs instead")
+    g.add_argument("--judge-threshold", type=float, default=0.98, metavar="FLOAT",
+                   help="blocks scoring below this are flagged (below_threshold) in the JSON and counted on stderr. "
+                        "0.98 is the Judge authors' uncalibrated default; correct readings typically score lower, "
+                        "see the README (default: %(default)s)")
     g.add_argument("--no-recover", action="store_true",
-                   help="do not re-read blocks whose text is implausibly short for the ink they contain")
+                   help="with --no-judge, do not re-read blocks whose text is implausibly short for the ink they "
+                        "contain (with the Judge on, that re-read never runs)")
     g.add_argument("--script", choices=("auto", "off"), default="auto",
                    help="auto: if the document is Traditional Chinese, repair Simplified characters the "
                         "model drifted into (needs opencc); off: keep raw model output (default: %(default)s)")
@@ -183,7 +193,7 @@ def pick_device(requested: str | None) -> str:
 
 def required_model_dirs(args) -> list[str]:
     """The folders of --models-dir that the chosen options use (and nothing else)."""
-    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader]]
+    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader], *([] if args.no_judge else [JUDGE_MODEL_DIR])]
 
 
 def missing_models_message(args) -> str | None:
@@ -200,14 +210,19 @@ def worker_env_path() -> Path:
     return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
 
 
+def needs_worker(args) -> bool:
+    """The torch worker holds MiniCPM (--reader minicpm) and Jev (the Judge). --reader paddle --no-judge needs neither."""
+    return args.reader == "minicpm" or not args.no_judge
+
+
 def worker_env_problem() -> str | None:
     """None if the worker's virtual environment exists. Checked first because `uv run --no-sync` would
     otherwise silently create an empty one and fail later with a confusing import error."""
     path = worker_env_path()
     if path.is_dir():
         return None
-    return (f"the worker environment for --reader minicpm is not set up ({path} not found). "
-            "Create it once with:  uv sync --project worker   (or use --reader paddle)")
+    return (f"the worker environment (MiniCPM-OCR-1.0 and the Judge) is not set up ({path} not found). "
+            "Create it once with:  uv sync --project worker   (--reader paddle --no-judge runs without it)")
 
 
 def worker_environment() -> dict:
@@ -222,18 +237,20 @@ def worker_environment() -> dict:
 
 
 def worker_command(args, uv: str) -> list[str]:
+    """Only what the options use is loaded: --reader paddle leaves MiniCPM out, --no-judge leaves Jev out."""
     return [uv, "run", "--project", str(WORKER_DIR), "--no-sync",
-            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve())]
+            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve()),
+            *(["--no-reader"] if args.reader != "minicpm" else []), *(["--no-judge"] if args.no_judge else [])]
 
 
 def start_worker(args):
-    """Start the torch worker and wait until MiniCPM is loaded. Returns (client, ready event)."""
+    """Start the torch worker and wait until its models are loaded. Returns (client, ready event)."""
     from worker_client import WorkerClient, WorkerError
 
     uv = shutil.which("uv")
     if not uv:
-        sys.exit("error: `uv` is not on PATH; it starts the torch worker for --reader minicpm "
-                 "(install uv, or use --reader paddle)")
+        sys.exit("error: `uv` is not on PATH; it starts the torch worker (MiniCPM-OCR-1.0, the Judge) "
+                 "(install uv, or use --reader paddle --no-judge)")
     if problem := worker_env_problem():
         sys.exit(f"error: {problem}")
     client = WorkerClient(worker_command(args, uv), env=worker_environment())
@@ -251,6 +268,8 @@ def engine_info(args, device: str, ready: dict | None) -> dict:
         engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
     engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
     if ready:
+        if ready.get("judge") and not args.no_judge:
+            engine["judge"] = ready["judge"]
         engine.update(ready["versions"])
     engine["device"] = device
     return engine
@@ -289,12 +308,24 @@ def build_pipeline(args, device: str):
     )
 
 
-def attach_minicpm_reader(args, pipe, stack):
-    """Make the torch worker the pipeline's Reader. Returns (bridge, worker ready event). The worker and the
-    crop folder are released when `stack` closes."""
+def judge_setup_problems() -> list[str]:
+    """What the Judge's renderer needs from the machine (node, Noto Sans CJK, the bundled font), checked before
+    any model is loaded. Chromium is checked by the worker, which has Playwright."""
+    sys.path.insert(0, str(WORKER_DIR))
+    try:
+        import render_env
+    finally:
+        sys.path.remove(str(WORKER_DIR))
+    return render_env.setup_problems()
+
+
+def attach_worker(args, pipe, stack, ink):
+    """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
+    VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
 
     import reader_bridge
+    from script_repair import ScriptRepair, StickyScriptRepair
 
     try:
         reader_bridge.check_hook_support(pipe)
@@ -302,15 +333,41 @@ def attach_minicpm_reader(args, pipe, stack):
         sys.exit(f"error: {e}")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
+    judge = not args.no_judge
+    repair = None
+    if judge and args.script == "auto":
+        try:
+            repair = StickyScriptRepair(ScriptRepair())
+        except ImportError:
+            pass  # repair_script prints the note once; the Judge then judges the text as read
+    paddle_model = reader_bridge.original_vl_model(pipe) if args.reader == "paddle" else None
+    if paddle_model is not None:
+        free_paddle_cache()  # the pipeline's construction left several GB cached; the Judge needs the room
     t0 = time.time()
-    print("starting the MiniCPM worker ...", file=sys.stderr)
+    print("starting the torch worker ...", file=sys.stderr)
     client, ready = start_worker(args)
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, to_html=convert_otsl_to_html)
+    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair)
+    if paddle_model is not None:
+        bridge = reader_bridge.PaddleBridge(
+            paddle_model, client, tmp_dir, before_read=client.park if judge else None,
+            after_read=free_paddle_cache, **common)
+    else:
+        bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, **common)
+        if not judge and not args.no_recover:
+            bridge.ink_reread = ink.reread_with(bridge, args)
     reader_bridge.install_reader_hook(pipe, bridge)
     return bridge, ready
+
+
+def free_paddle_cache() -> None:
+    """Hand paddle's cached but unused GPU memory back (the allocator keeps it otherwise)."""
+    import paddle
+
+    if paddle.device.is_compiled_with_cuda():
+        paddle.device.cuda.empty_cache()
 
 
 TEXT_LABELS = {"text", "paragraph_title", "doc_title", "abstract", "content", "reference",
@@ -367,9 +424,26 @@ def glyph_estimate(crop) -> float:
     return total
 
 
+def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
+    """The ink-based re-read of one Block: if `text` is implausibly short for the ink in `crop`, read the Block
+    again from differently scaled renders (`reread_at_scale(factor)` returns that Reading) and return the
+    replacement if it is clearly longer and plausible, else None."""
+    est, n = glyph_estimate(crop), count_chars(text)
+    if est < MIN_GLYPHS or n >= SUSPECT_RATIO * est:
+        return None
+    best_text, best_n = None, n
+    for factor in RETRY_SCALES:
+        reread = reread_at_scale(factor)
+        m = count_chars(reread)
+        if best_n < m <= 1.6 * est:
+            best_text, best_n = reread, m
+    return best_text if best_text is not None and best_n > 1.5 * n else None
+
+
 def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
-    differently scaled renders and keep the result only if it is clearly longer and plausible."""
+    differently scaled renders and keep the result only if it is clearly longer and plausible.
+    (--reader paddle without the Judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
     renders: dict[float, tuple] = {}
     h_img, w_img = img.shape[:2]
@@ -380,11 +454,8 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
         crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
         if crop.size == 0:
             continue
-        est, n = glyph_estimate(crop), count_chars(b.content)
-        if est < MIN_GLYPHS or n >= SUSPECT_RATIO * est:
-            continue
-        best_text, best_n = None, n
-        for factor in RETRY_SCALES:
+
+        def reread_at_scale(factor, x1=x1, y1=y1, x2=x2, y2=y2):
             if factor not in renders:
                 renders[factor] = render_page(page, args.dpi * factor)
             img2, scale2 = renders[factor]
@@ -392,14 +463,47 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
             r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
             out = pipe.predict(r, use_layout_detection=False, prompt_label="ocr",
                                max_new_tokens=args.max_new_tokens, use_queues=False)[0]
-            text = "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
-            m = count_chars(text)
-            if best_n < m <= 1.6 * est:
-                best_text, best_n = text, m
-        if best_text is not None and best_n > 1.5 * n:
+            return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
+
+        better = ink_reread_block(crop, b.content, reread_at_scale)
+        if better is not None:
             notes.append({"bbox": [x1, y1, x2, y2], "original": b.content})
-            b.content = best_text
+            b.content = better
     return notes
+
+
+class InkReread:
+    """The ink-based re-read inside the bridge (--reader minicpm --no-judge): the bridge hands over each Reading;
+    the page it belongs to is set here before the pipeline runs. Re-reads go straight to the Reader."""
+
+    def __init__(self):
+        self.page = None  # (pdf page, BGR render, px per pt, renders cache)
+
+    def set_page(self, page, img, scale: float) -> None:
+        self.page = (page, img, scale, {})
+
+    def reread_with(self, bridge, args):
+        def ink_reread(request, text):
+            if self.page is None or request.label not in TEXT_LABELS or request.bbox is None:
+                return None
+            page, img, scale, renders = self.page
+            h_img, w_img = img.shape[:2]
+            x1, y1, x2, y2 = request.bbox
+            crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
+            if crop.size == 0:
+                return None
+
+            def reread_at_scale(factor):
+                if factor not in renders:
+                    renders[factor] = render_page(page, args.dpi * factor)
+                img2, scale2 = renders[factor]
+                k, pad = scale2 / scale, 4
+                r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
+                return bridge.read_crop(r, "text", args.max_new_tokens).strip()
+
+            return ink_reread_block(crop, text, reread_at_scale)
+
+        return ink_reread
 
 
 def fix_table_line_breaks(results: list[tuple[int, object]]) -> int:
@@ -425,8 +529,9 @@ def contiguous_groups(results: list[tuple[int, object]]):
         yield group
 
 
-def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str]) -> dict:
+def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes: dict | None = None) -> dict:
     d = res.json["res"]
+    outcomes = outcomes or {}
     reread = {tuple(n["bbox"]): n["original"] for n in meta["recovered"]}
     blocks = []
     for b in d["parsing_res_list"]:
@@ -441,8 +546,12 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str]) -> dict:
         }
         if (idx, b["block_id"]) in raw:
             block["content_raw"] = raw[(idx, b["block_id"])]
-        if tuple(int(v) for v in b["block_bbox"]) in reread:
-            block["content_before_reread"] = reread[tuple(int(v) for v in b["block_bbox"])]
+        bbox = tuple(int(v) for v in b["block_bbox"])
+        if bbox in reread:
+            block["content_before_reread"] = reread[bbox]
+        outcome = outcomes.get((idx, bbox))
+        if outcome is not None:
+            add_judge_fields(block, outcome)
         blocks.append(block)
     detections = [
         {"label": x["label"], "score": round(float(x["score"]), 4), "bbox": x["coordinate"]}
@@ -455,6 +564,82 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str]) -> dict:
         "scale_px_per_pt": round(meta["scale"], 6),
         "blocks": blocks,
         "layout_detections": detections,
+    }
+
+
+def add_judge_fields(block: dict, outcome) -> None:
+    """The Judge's verdict on a Block (nothing for a Block that is never judged: charts, seals, figures)."""
+    if outcome.text_before_reread is not None:
+        block["content_before_reread"] = outcome.text_before_reread
+    if not outcome.judged:
+        return
+    block["score"] = None if outcome.score is None else round(outcome.score, 6)
+    block["verdict"] = outcome.verdict
+    block["below_threshold"] = outcome.below_threshold
+    if outcome.verdict_detail and outcome.verdict != "scored":
+        block["verdict_detail"] = outcome.verdict_detail
+    if outcome.judged_before_script_decision:
+        block["judged_before_script_decision"] = True  # judged before the document was known to be Traditional
+    if outcome.text != block["content"]:
+        block["judged_text"] = outcome.text  # the Score describes this text, not the one written above
+
+
+def undo_sticky_repair(ok: list[tuple[int, object]], outcomes: dict) -> int:
+    """Put back the text the sticky repair changed while reading, so that repair_script (the document-level
+    pass) decides on the whole document alone and the output text stays what it was before the Judge existed.
+    A Block the pipeline changed after the bridge returned it is left alone."""
+    undone = 0
+    for idx, r in ok:
+        for b in r["parsing_res_list"]:
+            o = outcomes.get((idx, tuple(int(v) for v in b.bbox)))
+            if o is not None and o.text_before_repair is not None and b.content == o.text:
+                b.content = o.text_before_repair
+                undone += 1
+    return undone
+
+
+def judge_summary(outcomes: dict) -> dict:
+    """The JSON `postprocessing.judge` section: how many Blocks were judged, flagged, and with which verdicts."""
+    judged = [o for o in outcomes.values() if o.judged]
+    verdicts: dict[str, int] = {}
+    for o in judged:
+        verdicts[o.verdict] = verdicts.get(o.verdict, 0) + 1
+    return {"blocks_judged": len(judged),
+            "blocks_below_threshold": sum(1 for o in judged if o.below_threshold),
+            "verdicts": dict(sorted(verdicts.items())),
+            "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
+
+
+def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
+              recovered: int) -> str:
+    """One progress line on stderr."""
+    line = f"[{n:>3}/{total}] page {page_no}: {n_blocks} blocks, {seconds:.1f}s"
+    if summary is not None:
+        line += f", {summary['below_threshold']} of {summary['judged']} judged below the threshold"
+        if summary["not_scored"]:
+            line += f" ({summary['not_scored']} not scored)"
+    if recovered:
+        line += f", re-read {recovered} short block(s)"
+    return line
+
+
+def settings_info(args) -> dict:
+    """The JSON `settings` section."""
+    return {
+        "reader": args.reader,
+        "judge": not args.no_judge,
+        "judge_threshold": None if args.no_judge else args.judge_threshold,
+        "dpi": args.dpi,
+        "layout_threshold": args.layout_threshold,
+        "max_new_tokens": args.max_new_tokens,
+        "chart_recognition": args.charts,
+        "seal_recognition": args.seals,
+        "ocr_for_image_blocks": args.ocr_images,
+        "merge_layout_blocks": not args.no_merge_blocks,
+        "reread_short_blocks": args.no_judge and not args.no_recover,  # the ink-based re-read; never with the Judge
+        "markdown_merge_tables": not args.no_merge_tables,
+        "markdown_ignore_labels": list(args.md_ignore_labels),
+        "csv_export": not args.no_csv,
     }
 
 
@@ -663,8 +848,10 @@ def _transcribe(args, stack) -> int:
         sys.exit(f"error: no such file: {args.pdf}")
     if msg := missing_models_message(args):
         sys.exit(f"error: {msg}")
-    if args.reader == "minicpm" and (problem := worker_env_problem()):
+    if needs_worker(args) and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
+    if not args.no_judge and (problems := judge_setup_problems()):
+        sys.exit("error: the Judge's renderer is not set up (or use --no-judge):\n  - " + "\n  - ".join(problems))
     try:
         pdf = pdfium.PdfDocument(str(args.pdf))
     except pdfium.PdfiumError as e:
@@ -685,8 +872,9 @@ def _transcribe(args, stack) -> int:
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
     pipe = build_pipeline(args, device)
     bridge = ready = None
-    if args.reader == "minicpm":
-        bridge, ready = attach_minicpm_reader(args, pipe, stack)
+    ink = InkReread()
+    if needs_worker(args):
+        bridge, ready = attach_worker(args, pipe, stack, ink)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
 
     ok: list[tuple[int, object]] = []
@@ -697,13 +885,20 @@ def _transcribe(args, stack) -> int:
         page = pdf[idx]
         try:
             img, scale = render_page(page, args.dpi)
+            if bridge is not None:
+                bridge.current_page = idx
+                ink.set_page(page, img, scale)
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
-            recovered = [] if args.no_recover else recover_short_blocks(pipe, page, res, img, scale, args)
+            recovered = []
+            if args.no_judge and not args.no_recover and not args.reader == "minicpm":
+                recovered = recover_short_blocks(pipe, page, res, img, scale, args)  # PaddleOCR-VL, as before
+            n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
+                                             if p == idx and o.text_before_reread is not None) if bridge else 0)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
-            print(f"[{n:>3}/{len(indices)}] page {idx + 1}: {len(res['parsing_res_list'])} blocks, "
-                  f"{time.time() - t0:.1f}s" + (f", re-read {len(recovered)} short block(s)" if recovered else ""),
-                  file=sys.stderr)
+            print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
+                            summary=bridge.page_summary(idx) if bridge and not args.no_judge else None,
+                            recovered=n_reread), file=sys.stderr)
         except Exception as e:  # keep going; the failure is recorded in the JSON and the exit code
             errors[idx] = f"{type(e).__name__}: {e}"
             print(f"[{n:>3}/{len(indices)}] page {idx + 1}: FAILED {errors[idx]}", file=sys.stderr)
@@ -711,11 +906,13 @@ def _transcribe(args, stack) -> int:
             page.close()
 
     stack.close()  # the worker is not needed any more; free its GPU memory before the post-processing
+    outcomes = bridge.outcomes if bridge else {}
 
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
+    undo_sticky_repair(ok, outcomes)  # the document-level repair below decides alone, as it always did
     tables_fixed = fix_table_line_breaks(ok)
     script_info, raw = repair_script(ok, args.script)
-    pages = {idx: page_json(idx, r, meta[idx], raw, args.md_ignore_labels) for idx, r in ok}
+    pages = {idx: page_json(idx, r, meta[idx], raw, args.md_ignore_labels, outcomes) for idx, r in ok}
 
     # Cross-page restructuring is for the Markdown only: it moves the content of a table that
     # continues over a page break into one table and re-levels the headings.
@@ -749,24 +946,12 @@ def _transcribe(args, stack) -> int:
             "pages_failed": [i + 1 for i in sorted(errors)],
         },
         "engine": engine_info(args, device, ready),
-        "settings": {
-            "reader": args.reader,
-            "dpi": args.dpi,
-            "layout_threshold": args.layout_threshold,
-            "max_new_tokens": args.max_new_tokens,
-            "chart_recognition": args.charts,
-            "seal_recognition": args.seals,
-            "ocr_for_image_blocks": args.ocr_images,
-            "merge_layout_blocks": not args.no_merge_blocks,
-            "reread_short_blocks": not args.no_recover,
-            "markdown_merge_tables": not args.no_merge_tables,
-            "markdown_ignore_labels": list(args.md_ignore_labels),
-            "csv_export": not args.no_csv,
-        },
+        "settings": settings_info(args),
         "postprocessing": {
             "tables_with_line_breaks_fixed": tables_fixed,
             **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
             "script_repair": script_info,
+            **({"judge": judge_summary(outcomes)} if bridge and not args.no_judge else {}),
         },
         "csv_tables": csv_info,
         "elapsed_seconds": round(time.time() - t_start, 1),
