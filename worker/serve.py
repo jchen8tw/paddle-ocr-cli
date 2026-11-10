@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     if not model_dir.is_dir():
         return fail("model", f"MiniCPM-OCR-1.0 not found at {model_dir}")
     try:
-        from reader import MiniCPMReader  # worker/reader.py, next to this script
+        from minicpm_model import MiniCPMReader  # worker/minicpm_model.py, next to this script
 
         reader = MiniCPMReader(model_dir)
     except Exception as e:

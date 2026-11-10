@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Transcribe a PDF to Markdown and JSON with PaddleOCR-VL-1.6, using the local models in ./models.
+"""Transcribe a PDF to Markdown and JSON with MiniCPM-OCR-1.0 (or PaddleOCR-VL-1.6), using the local models in ./models.
 
     python pdf_ocr.py input.pdf                  # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
     python pdf_ocr.py input.pdf -o out --pages 1-5,9
+    python pdf_ocr.py input.pdf --reader paddle  # PaddleOCR-VL-1.6 instead of MiniCPM-OCR-1.0
 
-Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks ->
-PaddleOCR-VL-1.6 recognises every block (text / table / formula; charts and seals on request) ->
-block-level clean-up (Simplified/Traditional repair, truncated-block re-read) -> JSON per page, and
-Markdown with cross-page tables merged and title levels fixed, plus one CSV per well-formed table.
+Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks -> the Reader
+(MiniCPM-OCR-1.0 in the torch worker, or PaddleOCR-VL-1.6) recognises every block (text / table /
+formula; charts and seals on request) -> block-level clean-up (Simplified/Traditional repair,
+truncated-block re-read) -> JSON per page, and Markdown with cross-page tables merged and title
+levels fixed, plus one CSV per well-formed table.
 """
 from __future__ import annotations
 
@@ -18,7 +20,9 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import warnings
 from html.parser import HTMLParser
@@ -27,6 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
 VL_MODEL_DIR = "PaddleOCR-VL-1.6"
+MINICPM_MODEL_DIR = "MiniCPM-OCR-1.0"
+READER_MODEL_DIRS = {"minicpm": MINICPM_MODEL_DIR, "paddle": VL_MODEL_DIR}
+WORKER_DIR = ROOT / "worker"  # second uv project: torch + transformers (docs/adr/0001)
 
 # Page furniture that is kept in the JSON but left out of the Markdown by default.
 # (PaddleOCR's own default also drops `footnote`; that is real content, so it is kept here.)
@@ -39,16 +46,21 @@ MAX_RENDER_PIXELS = 40_000_000  # guard against huge pages exhausting memory at 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pdf_ocr",
-        description="Transcribe a PDF to Markdown + JSON with PaddleOCR-VL-1.6 (local models).",
+        description="Transcribe a PDF to Markdown + JSON with MiniCPM-OCR-1.0 or PaddleOCR-VL-1.6 (local models).",
     )
     p.add_argument("pdf", type=Path, help="input PDF")
     p.add_argument("-o", "--output-dir", type=Path, help="output directory (default: output/<pdf stem>)")
     p.add_argument("--models-dir", type=Path, default=ROOT / "models",
-                   help=f"folder holding {LAYOUT_MODEL_DIR}/ and {VL_MODEL_DIR}/ (default: ./models)")
+                   help=f"folder holding {LAYOUT_MODEL_DIR}/ and the Reader's folder: {MINICPM_MODEL_DIR}/ or "
+                        f"{VL_MODEL_DIR}/ with --reader paddle (default: ./models)")
     p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all)")
     p.add_argument("--device", help="paddle device, e.g. gpu:0 or cpu (default: gpu:0 if available)")
 
     g = p.add_argument_group("accuracy")
+    g.add_argument("--reader", choices=("minicpm", "paddle"), default="minicpm",
+                   help="model that reads each block: minicpm = MiniCPM-OCR-1.0, run in the torch worker "
+                        "(needs the worker environment, see the README); paddle = PaddleOCR-VL-1.6 "
+                        "(default: %(default)s)")
     # Defaults below were tuned against the text layer of a 21-page Traditional Chinese PDF:
     # 216 vs 288 DPI were equivalent (216 is faster); layout threshold 0.3 -> 0.2 cut text lost to
     # missed layout blocks from ~85 to ~20 characters, while 0.1 starts producing false boxes.
@@ -57,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="layout detection score threshold; lower = fewer missed blocks, "
                         "too low = false boxes (default: %(default)s)")
     g.add_argument("--max-new-tokens", type=int, default=8192,
-                   help="decoding limit per block; raise for very large tables (default: %(default)s)")
+                   help="decoding limit per block; raise for very large tables. With --reader minicpm this is "
+                        "the limit for tables only; other blocks have fixed limits by type (default: %(default)s)")
     g.add_argument("--charts", action="store_true",
                    help="convert charts to data tables. Off by default: values are estimated and the model "
                         "can invent data for figures it mistakes for charts; otherwise the chart is saved as an image")
@@ -230,6 +243,80 @@ def pick_device(requested: str | None) -> str:
     return "cpu"
 
 
+def required_model_dirs(args) -> list[str]:
+    """The folders of --models-dir that the chosen options use (and nothing else)."""
+    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader]]
+
+
+def missing_models_message(args) -> str | None:
+    missing = [d for d in required_model_dirs(args) if not (args.models_dir / d).is_dir()]
+    if not missing:
+        return None
+    other = "paddle" if args.reader == "minicpm" else "minicpm"
+    return (f"model folder(s) not found under {args.models_dir}: {', '.join(missing)}. "
+            f"Put them there (nothing is downloaded at run time); --reader {other} needs "
+            f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
+
+
+def worker_env_path() -> Path:
+    return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
+
+
+def worker_env_problem() -> str | None:
+    """None if the worker's virtual environment exists. Checked first because `uv run --no-sync` would
+    otherwise silently create an empty one and fail later with a confusing import error."""
+    path = worker_env_path()
+    if path.is_dir():
+        return None
+    return (f"the worker environment for --reader minicpm is not set up ({path} not found). "
+            "Create it once with:  uv sync --project worker   (or use --reader paddle)")
+
+
+def worker_environment() -> dict:
+    env = dict(os.environ)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)  # that one belongs to the main project, not the worker's
+    if os.environ.get("PDF_OCR_WORKER_ENV"):
+        env["UV_PROJECT_ENVIRONMENT"] = os.environ["PDF_OCR_WORKER_ENV"]
+    env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false",
+               PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
+    return env
+
+
+def worker_command(args, uv: str) -> list[str]:
+    return [uv, "run", "--project", str(WORKER_DIR), "--no-sync",
+            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve())]
+
+
+def start_worker(args):
+    """Start the torch worker and wait until MiniCPM is loaded. Returns (client, ready event)."""
+    from worker_client import WorkerClient, WorkerError
+
+    uv = shutil.which("uv")
+    if not uv:
+        sys.exit("error: `uv` is not on PATH; it starts the torch worker for --reader minicpm "
+                 "(install uv, or use --reader paddle)")
+    if problem := worker_env_problem():
+        sys.exit(f"error: {problem}")
+    client = WorkerClient(worker_command(args, uv), env=worker_environment())
+    try:
+        return client, client.start()
+    except WorkerError as e:
+        client.close()
+        sys.exit(f"error: {e}")
+
+
+def engine_info(args, device: str, ready: dict | None) -> dict:
+    """The JSON `engine` section: the Layout model and the Reader, with the library versions."""
+    engine = {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader]}
+    if args.reader == "paddle":
+        engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
+    engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
+    if ready:
+        engine.update(ready["versions"])
+    engine["device"] = device
+    return engine
+
+
 def build_pipeline(args, device: str):
     from paddleocr import PaddleOCRVL
 
@@ -238,10 +325,16 @@ def build_pipeline(args, device: str):
 
         pdx_logging.setup_logging("WARNING")
 
+    if args.reader == "paddle":
+        reader_args = {"vl_rec_model_dir": str(args.models_dir / VL_MODEL_DIR)}
+    else:
+        # The Reader is replaced by the worker (reader_bridge). Naming a server backend with a URL that is
+        # never contacted keeps PaddleOCR-VL's weights, ~7 GB of GPU memory, from being loaded.
+        reader_args = {"vl_rec_backend": "vllm-server", "vl_rec_server_url": "http://127.0.0.1:9/v1"}
     return PaddleOCRVL(
         pipeline_version="v1.6",
         layout_detection_model_dir=str(args.models_dir / LAYOUT_MODEL_DIR),
-        vl_rec_model_dir=str(args.models_dir / VL_MODEL_DIR),
+        **reader_args,
         device=device,
         layout_threshold=args.layout_threshold,
         use_layout_detection=True,
@@ -255,6 +348,30 @@ def build_pipeline(args, device: str):
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
     )
+
+
+def attach_minicpm_reader(args, pipe, stack):
+    """Make the torch worker the pipeline's Reader. Returns (bridge, worker ready event). The worker and the
+    crop folder are released when `stack` closes."""
+    from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
+
+    import reader_bridge
+
+    try:
+        reader_bridge.check_hook_support(pipe)
+    except reader_bridge.HookUnsupported as e:
+        sys.exit(f"error: {e}")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
+    stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
+    t0 = time.time()
+    print("starting the MiniCPM worker ...", file=sys.stderr)
+    client, ready = start_worker(args)
+    stack.callback(client.close)
+    print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
+          f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
+    bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, to_html=convert_otsl_to_html)
+    reader_bridge.install_reader_hook(pipe, bridge)
+    return bridge, ready
 
 
 TEXT_LABELS = {"text", "paragraph_title", "doc_title", "abstract", "content", "reference",
@@ -594,13 +711,21 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
 
 
 def transcribe(args) -> int:
+    import contextlib
+
+    with contextlib.ExitStack() as stack:  # releases the worker and its crop folder, however the run ends
+        return _transcribe(args, stack)
+
+
+def _transcribe(args, stack) -> int:
     import pypdfium2 as pdfium
 
     if not args.pdf.is_file():
         sys.exit(f"error: no such file: {args.pdf}")
-    for name, what in ((LAYOUT_MODEL_DIR, "layout model"), (VL_MODEL_DIR, "VL model")):
-        if not (args.models_dir / name).is_dir():
-            sys.exit(f"error: {what} not found at {args.models_dir / name}")
+    if msg := missing_models_message(args):
+        sys.exit(f"error: {msg}")
+    if args.reader == "minicpm" and (problem := worker_env_problem()):
+        sys.exit(f"error: {problem}")
     try:
         pdf = pdfium.PdfDocument(str(args.pdf))
     except pdfium.PdfiumError as e:
@@ -620,6 +745,9 @@ def transcribe(args) -> int:
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
     pipe = build_pipeline(args, device)
+    bridge = ready = None
+    if args.reader == "minicpm":
+        bridge, ready = attach_minicpm_reader(args, pipe, stack)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
 
     ok: list[tuple[int, object]] = []
@@ -642,6 +770,8 @@ def transcribe(args) -> int:
             print(f"[{n:>3}/{len(indices)}] page {idx + 1}: FAILED {errors[idx]}", file=sys.stderr)
         finally:
             page.close()
+
+    stack.close()  # the worker is not needed any more; free its GPU memory before the post-processing
 
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
     tables_fixed = fix_table_line_breaks(ok)
@@ -679,15 +809,9 @@ def transcribe(args) -> int:
             "pages_processed": [i + 1 for i in indices],
             "pages_failed": [i + 1 for i in sorted(errors)],
         },
-        "engine": {
-            "pipeline": "PaddleOCR-VL-1.6",
-            "layout_model": LAYOUT_MODEL_DIR,
-            "vl_model": VL_MODEL_DIR,
-            "paddleocr": importlib.metadata.version("paddleocr"),
-            "paddlex": importlib.metadata.version("paddlex"),
-            "device": device,
-        },
+        "engine": engine_info(args, device, ready),
         "settings": {
+            "reader": args.reader,
             "dpi": args.dpi,
             "layout_threshold": args.layout_threshold,
             "max_new_tokens": args.max_new_tokens,
@@ -700,7 +824,11 @@ def transcribe(args) -> int:
             "markdown_ignore_labels": list(args.md_ignore_labels),
             "csv_export": not args.no_csv,
         },
-        "postprocessing": {"tables_with_line_breaks_fixed": tables_fixed, "script_repair": script_info},
+        "postprocessing": {
+            "tables_with_line_breaks_fixed": tables_fixed,
+            **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
+            "script_repair": script_info,
+        },
         "csv_tables": csv_info,
         "elapsed_seconds": round(time.time() - t_start, 1),
         "pages": [pages[i] for i in sorted(pages)],

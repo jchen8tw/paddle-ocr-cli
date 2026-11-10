@@ -5,3 +5,4 @@ output/
 **/*.png
 **/*.jpg
 __pycache__
+.venv/
