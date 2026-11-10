@@ -1,4 +1,4 @@
-# pdf_ocr: PDF to Markdown, JSON and CSV with MiniCPM-OCR or PaddleOCR-VL
+# pdf_ocr: PDF to Markdown, JSON and CSV with MiniCPM-OCR or PaddleOCR-VL, with a Score for every Block
 
 `pdf_ocr.py` converts a PDF into Markdown, a detailed JSON file and one CSV per table. It uses only
 the local models in `models/`:
@@ -8,6 +8,7 @@ the local models in `models/`:
 | `models/PP-DocLayoutV3` | the Layout model: finds the blocks on each page (text, titles, tables, figures, …) and their reading order |
 | `models/MiniCPM-OCR-1.0` | the default Reader: reads each block, with tables as HTML, formulas as LaTeX, and charts or seals if you ask |
 | `models/PaddleOCR-VL-1.6` | the other Reader, chosen with `--reader paddle` |
+| `models/MiniCPM-OCR-Jev` | the Judge: rates every text, formula and table Reading from 0 to 1 (a Score), on by default; `--no-judge` turns it off |
 
 It downloads nothing, and the model-hoster connectivity check is switched off.
 
@@ -27,20 +28,52 @@ uv sync                      # the main environment: the Layout model, PaddleOCR
 uv sync --project worker     # the worker environment: torch + transformers for MiniCPM (about 5.6 GB, CUDA 13.2 wheels)
 ```
 
-The worker environment is created in `worker/.venv`. It is needed only for the default `--reader minicpm`;
-with `--reader paddle` you can skip it. If it is missing, the tool stops at once and tells you to run the
+The worker environment is created in `worker/.venv`. It holds MiniCPM-OCR-1.0 and the Judge, so it is needed
+unless you run `--reader paddle --no-judge`. If it is missing, the tool stops at once and tells you to run the
 second command. The torch wheel from PyPI is built for CUDA 13.2, so the GPU driver must support it. The
 two environments are separate processes, so their CUDA libraries never meet.
 
 If no CUDA GPU is found, the tool runs on the CPU, which works but is slow. (The MiniCPM worker needs a CUDA GPU.)
 
 `--models-dir` has to hold only the folders that your options use: `PP-DocLayoutV3` always, plus
-`MiniCPM-OCR-1.0` for the default Reader or `PaddleOCR-VL-1.6` for `--reader paddle`. A missing folder is
-reported by name before anything is loaded.
+`MiniCPM-OCR-1.0` for the default Reader or `PaddleOCR-VL-1.6` for `--reader paddle`, plus `MiniCPM-OCR-Jev`
+unless you pass `--no-judge`. A missing folder is reported by name before anything is loaded.
 
-On a 12 GB GPU the default path (the Layout model and MiniCPM) is small: measured with `nvidia-smi`, about 0.9 GB
-for the main process and about 2.7 GB for the worker once the model is loaded (more while it reads a long table).
-`--reader paddle` holds about 8 GB.
+**The Judge also needs three things from the machine, one of them a one-time download.** (Skip all of this with
+`--no-judge`.) The tool checks them before it loads any model, and names what is missing:
+
+```bash
+uv run --project worker playwright install chromium   # once: headless Chromium for the renderer, ~650 MB in ~/.cache/ms-playwright
+```
+
+- **Chromium**, installed by the command above. Set `PLAYWRIGHT_BROWSERS_PATH` if you keep it elsewhere. On a
+  fresh Linux machine `playwright install --with-deps chromium` also installs Chromium's system libraries (it
+  needs root).
+- **`node`** (Node.js) on `PATH`. The Judge's renderer screens each Reading's LaTeX with KaTeX in Node before
+  drawing it; a Reading KaTeX cannot parse gets the verdict `precheck_reject`.
+- **Noto Sans CJK** installed in the system (`fonts-noto-cjk`, `noto-fonts-cjk` or `google-noto-sans-cjk-fonts`,
+  depending on the distribution; `fc-list | grep "Noto Sans CJK"` must find it). The renderer draws Latin
+  letters, digits and CJK text with it.
+- The **bundled font** `worker/fonts/DroidSansFallbackFull.ttf` ships in the repository (Apache-2.0, with its
+  licence files) and fills the CJK glyphs Noto lacks. If it is missing the tool says so; `git checkout` restores it.
+
+Why the system's Noto Sans CJK is needed even though the font is bundled, and why the renderer runs under its
+own fontconfig, is explained in "The Judge" below.
+
+Memory on a 12 GB GPU, measured with `nvidia-smi` (RTX 4070 Ti, 12,282 MiB, with about 2.4 GB used by the desktop
+and a game during the measurements; a four-page run of a stand-in PDF, see below):
+
+| path | main process | worker | peak of the whole card |
+|---|---|---|---|
+| default: Layout model + MiniCPM + Jev | 874 MiB | 7,514 MiB | 10,963 MiB |
+| `--reader paddle` (Judge on): Layout model + PaddleOCR-VL, Jev in the worker | 8,126 MiB at start-up, less later | 5,006 MiB | 11,393 MiB |
+
+So the default options fit with all three models loaded at once. A very long table adds up to about 1.4 GB
+while Jev scores it. `--reader paddle` alone holds about 8 GB, and PaddleOCR-VL plus Jev side by side do not fit
+(about 12.5 GB before the desktop). To make them fit, the run releases PaddleOCR-VL's cached memory after
+construction and after every page's read, and moves Jev's weights to the CPU while PaddleOCR-VL reads, and back
+before scoring (about a second per page). If your card is shared with other heavy processes and the Judge still runs
+out of memory, the run says so: use `--no-judge` or `--reader minicpm`.
 
 ## Usage
 
@@ -78,7 +111,9 @@ and in the Markdown, and the exit code is 1.
 | `--seals` | off | read the text on seals and stamps |
 | `--ocr-images` | off | also OCR any text inside figures |
 | `--no-merge-blocks` | | do not merge adjacent text blocks before OCR |
-| `--no-recover` | | turn off the truncated-block re-read |
+| `--no-judge` | | do not score blocks (no Judge, no `playwright`, `node` or Noto Sans CJK needed). The ink-based re-read of short blocks runs instead |
+| `--judge-threshold FLOAT` | 0.98 | blocks whose Score is below this are flagged `below_threshold` in the JSON and counted per page on stderr (see "The Judge" for what to expect at 0.98) |
+| `--no-recover` | | with `--no-judge`, turn off the truncated-block re-read. With the Judge on that re-read never runs |
 | `--script {auto,off}` | `auto` | Simplified to Traditional repair; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |
 | `--no-merge-tables` | | keep a table that continues over a page break as separate per-page tables in the Markdown and CSV |
@@ -92,10 +127,14 @@ and in the Markdown, and the exit code is 1.
 
 The JSON has these top-level keys:
 - `source`: file name, sha256, page count, pages processed and pages that failed.
-- `engine`: the Layout model and the Reader (`layout_model`, `reader`), the library versions and the device.
-  With MiniCPM it also has the `torch` and `transformers` versions of the worker.
-- `settings`: every option that affects the output, including `reader`.
-- `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`).
+- `engine`: the Layout model, the Reader and the Judge (`layout_model`, `reader`, `judge`), the library versions
+  and the device. Whenever the worker runs (MiniCPM, or the Judge) it also has the `torch`, `transformers`,
+  `playwright` and `pillow` versions.
+- `settings`: every option that affects the output, including `reader`, `judge` and `judge_threshold` (null
+  with `--no-judge`).
+- `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`; with the Judge, a
+  `judge` summary: blocks judged, blocks below the threshold, a count per verdict, and how many blocks were
+  judged before the document was known to be Traditional).
 - `csv_tables`: which tables were exported and which were skipped.
 - `elapsed_seconds`.
 - `pages`.
@@ -104,6 +143,8 @@ Each page lists its `blocks`, each with these fields:
 - `id`, `order`, `label`, `content`
 - `bbox` and `polygon`, in pixels of the rendered page. `scale_px_per_pt` converts them back to PDF points.
 - `in_markdown`
+- with the Judge, on every text, formula and table block: `score` (the Judge's 0-1 rating of the written text, or
+  `null`), `verdict` and `below_threshold`; charts, seals and figures have none of these (see "The Judge")
 
 A page also keeps its unfiltered `layout_detections` with scores. When a clean-up step changes a block,
 the original text is kept next to it (`content_raw` for the script repair, `content_before_reread` for
@@ -222,7 +263,7 @@ The raw Reading is then cleaned in this order:
 4. **Simplified to Traditional repair**, as for PaddleOCR-VL. It is document-level and runs after all
    pages, which is why it comes after the Reader and not inside it.
 
-The truncated-block re-read (`--no-recover`) also works with MiniCPM.
+The truncated-block re-read (`--no-recover`) also works with MiniCPM, but only without the Judge (`--no-judge`).
 
 What differs from PaddleOCR-VL in the text: MiniCPM keeps the printed spacing around Latin letters and
 digits (`表 1-1`, `OCR 及`), writes `[...]` for the printed `〔...〕`, and uses `(...)` for full-width
@@ -244,12 +285,95 @@ does not say which Reader is better on the sample. The measurement on the sample
 Roughly the same time per page for both Readers (about 65 s for these 10 pages, including the
 model load).
 
+### The Judge
+
+The Judge is MiniCPM-OCR Jev. It does not read; it looks at the Block's image and at an image of the Reading
+rendered with Chromium and KaTeX, and answers how likely the Reading is to be correct. That is the **Score**, from 0
+to 1. It is on by default and works with either Reader. This version only scores: every Block is read once, and
+nothing is read again because of a low Score. (Re-reading low-Score Blocks is the next step in the plan.)
+
+- **What is judged.** Text, titles, footnotes, references (category `text`), inline and display formulas
+  (`formula`) and tables (`table`). Charts, seals and figures are never judged (the Judge was not trained on
+  them): they carry no `score`, `verdict` or `below_threshold`.
+- **Per Block in the JSON.** `score` is the Judge's number for the *written* text. `verdict` says whether it is
+  real. `below_threshold` is true when the Block should be looked at.
+
+  | `verdict` | meaning | `score` | `below_threshold` |
+  |---|---|---|---|
+  | `scored` | a real Score | 0-1 | `score < --judge-threshold` |
+  | `precheck_reject` | KaTeX cannot parse the Reading's LaTeX: the Reading is unusable | null | true |
+  | `render_error` | the renderer failed: the Reading is unusable | null | true |
+  | `missing_original_image` | the renderer got no readable crop: the Reading is unusable | null | true |
+  | `encode_error` | the images could not be encoded: scoring never happened | null | true |
+  | `forward_error` | the model (or the worker) failed: scoring never happened | null | true |
+
+  The official SDK reports 0.0 for the first three and -1.0 for the last two; those are *not* Scores, so they
+  are `null` here, and a failed Block is flagged rather than given a fake low Score. `verdict_detail` carries the
+  reason. A failure on one Block never stops the run: the Reading is kept and the failure recorded. A page whose
+  Judge call fails entirely gets `forward_error` on all its judged Blocks.
+- **On stderr**, each page's line says how many of its judged Blocks are below the threshold, e.g.
+  `[  2/21] page 4: 13 blocks, 9.9s, 13 of 13 judged below the threshold`, with the number not scored in
+  brackets when there are some. The Markdown contains no Scores or markers.
+- **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
+  of a merged table.
+- **Same text as written.** Before a Reading is judged it gets the same clean-up it gets for the output:
+  the repetition cut, `\(...\)` and `\[...\]` rewritten to ` $ ... $ ` / ` $$ ... $$ ` (the pipeline does that
+  anyway, afterwards; with the delimiters rewritten a Reading scored 0.9895 against 0.9951 for the raw `\(...\)`
+  form on the SDK's text example, and both render as math), OTSL converted to HTML for tables, line breaks inside
+  table cells turned into `<br>`, and the Simplified to Traditional repair (below). Raw OTSL scored about 0.0005 for
+  a correct table, which is why tables go to the Judge as HTML.
+- **One Chromium launch per page.** The Readings of a page are rendered in one batch (a launch costs about 0.8 s)
+  and scored one at a time (batching changes the Scores slightly). On the stand-in PDF the Judge added about 2.6 s per
+  page (the four pages took 24 s of page time without it and 34 s with it).
+
+**The repair is decided while reading, so the Judge sees repaired text.** The Simplified to Traditional repair is
+document-level: it needs the whole document to decide the document is Traditional (at least 30 Traditional-only
+characters and at most 15 % Simplified). The Judge works per Block, so the decision is made on the Readings seen so
+far, in reading order, and stays made: once the rule holds, every later Reading is repaired before it is judged.
+The Reading that completes the evidence is repaired too. Same input in the same order always gives the same
+decision. The document-level repair still runs afterwards on the original Readings, exactly as before, so the
+written text is unchanged by the Judge. Two consequences, both recorded in the JSON:
+
+- A Block read *before* the decision was judged unrepaired, so its Score may describe the pre-repair text. Those
+  Blocks have `judged_before_script_decision: true`. On the stand-in this was the first four Blocks of the first
+  page; with a non-Traditional document the decision never happens and nothing is repaired.
+- If the document-level repair ends up changing a Block differently from the sticky one (for example the sticky
+  decision came early and the full survey disagrees), the block has `judged_text`, the text that was actually
+  scored, next to `content`, the text that was written.
+
+**Scores are not bit-for-bit reproducible across machines**, and the authors say thresholds must be calibrated on
+your own data. On one machine and one GPU the same PDF gives identical Scores (the end-to-end test runs it twice
+and compares the JSON).
+
+**The default threshold of 0.98 flags most Blocks.** 0.98 is the authors' uncalibrated default (`tau`). On a
+four-page run of a stand-in document (a digital-born Traditional Chinese proposal, *not* the sample), 40 judged
+Blocks scored a median of 0.941 (range 0.485 to 0.994); 2 reached 0.98, 28 reached 0.90. The Readings were
+plausible by eye, so most correct Readings are flagged until the threshold is calibrated on the sample (a
+later ticket). `--judge-threshold` changes the flag; the Score itself does not depend on it. The two lowest
+were a table (0.48; not checked against the page) and a paragraph where the Reader had misread `爰` as `爱` (0.72), a
+known misread.
+
+**Why the renderer needs the system's Noto Sans CJK, and how it is made reproducible.** The renderer is the
+authors' own, vendored unchanged in `worker/render/` ([ADR-0002](docs/adr/0002-judge-uses-the-official-renderer.md)
+and its amendment). The first plan was to bundle DroidSansFallbackFull *instead of* the system's Noto Sans CJK.
+That does not work: Droid has no Latin letters, digits or Greek, so English text renders as empty boxes. In the
+authors' setup Latin and digits come from Noto Sans CJK and Droid only fills CJK gaps. So the bundled Droid font
+works *behind* the system's Noto Sans CJK. The renderer runs under a private fontconfig that lists only those two,
+with the rendering rules (slight hinting, antialiasing, LCD filter) written out; they are not left to the machine,
+because a file with the font folders alone changed the Scores (table example 0.025 instead of 0.032, the authors
+observed 0.041). With the rules, Scores on the SDK's three reference examples deviate from the authors' by 0.0017 on
+average and 0.009 at most (their own expectation is about 0.005). The full comparison is in the ADR.
+
 ### How the worker is wired in
 
 The main command builds the PaddleOCR pipeline with the Layout model only (PaddleOCR-VL's weights are not
 loaded for `--reader minicpm`). Then it replaces the pipeline's per-block recognizer with a bridge that
 sends each crop to the worker as a PNG file in a temporary folder and reads the answer back as one line of
-JSON. The worker is a long-lived process: the model is loaded once, and the main command stops it at the
+JSON. The bridge hands a page's Blocks to `block_reader.py`, "read a Block": a plain module (no GPU, no paddle)
+that takes the Blocks, a Reader and a Judge, cleans and repairs each Reading, has the page judged in one batch,
+and returns the final text with its Score, verdict and flag. The worker has two jobs over the same protocol: `read`
+(MiniCPM) and `score` (render and judge a batch of Readings). With `--reader paddle` the bridge calls
+PaddleOCR-VL's own model as the Reader and the worker only judges, so the worker loads no MiniCPM. The worker is a long-lived process: the model is loaded once, and the main command stops it at the
 end of the run, whatever happens. The code is in `reader_bridge.py` (the hook), `worker_client.py` (the
 process and protocol) and `worker/` (the torch side).
 
@@ -266,7 +390,10 @@ timeout, so a stuck worker cannot hang the run.
 - The tuning was measured on one Traditional Chinese document, with PaddleOCR-VL. Other languages and
   layouts should work, but these numbers do not carry over to them. MiniCPM-OCR-1.0 became the default
   before it was measured on that document; see the stand-in measurement above.
-- `--reader minicpm` needs the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
+- The Judge adds three setup items (Chromium, `node`, Noto Sans CJK) and about 2.6 s per page; `--no-judge` avoids
+  them. With the default threshold of 0.98 most Blocks are flagged (see "The Judge"), and a Score is only as
+  comparable as the machine it was made on.
+- `--reader minicpm` and the Judge need the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
   torch wheel targets CUDA 13.2; a driver that supports only CUDA 13.0 needs a different torch index in
   `worker/pyproject.toml`. This was not tested.
 - About 94 of the 23,390 characters in the sample are still wrong, and these are model errors:
@@ -291,21 +418,31 @@ uv run pytest                # fast tests; the tests that need a PDF skip withou
 PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf uv run pytest          # also run the CLI on pages 1-3 (GPU + models)
 ```
 
-The fast tests need neither a GPU nor models: the prompt and token limit of each block label, the
+The fast tests need neither a GPU nor models: "read a Block" with a fake Reader and a fake Judge (repair happens
+before judging, unjudged labels are skipped, failure verdicts, `--no-judge` and the ink re-read), the sticky
+repair, the Judge's verdicts with a fake renderer and model, the renderer's setup checks and fontconfig, the
+bridges, the JSON fields, the prompt and token limit of each block label, the
 clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
 a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, and the `--reader` options.
 
-The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer), the models and, for
-MiniCPM, the worker environment:
+The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer; except the reference-example
+test), the models, the worker environment (the Judge runs in it for either Reader) and the Judge's setup:
 
 - `tests/test_hook_regression.py` runs the hook on a real page with the real Layout model and a fake Reader.
   It needs no Reader weights and little GPU memory, and it fails when a PaddleX upgrade moves the private
   names the hook uses.
 - `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
   is recorded as failed, and the next page gets a new worker.
-- `tests/test_e2e.py` runs the CLI twice, once per Reader, on a few pages. It checks the output structure (the
-  same for both Readers), that the character error rate against the text layer stays at or below the bound
-  in `tests/baseline.json`, and that both runs give identical Markdown and JSON.
+- `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge`, for each Reader, on a few
+  pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a
+  `verdict` and a `below_threshold` and charts, seals and figures have none, that stderr counts the Blocks below
+  the threshold per page, that the Markdown has no Scores, that `--no-judge` gives no Scores and records
+  `judge: false`, that the character error rate against the text layer stays at or below the bound in
+  `tests/baseline.json`, and that both runs give identical Markdown and JSON, Scores included.
+- `tests/test_judge_reference.py` needs no sample PDF: it starts the real worker, scores the SDK's three
+  reference examples and compares with the Scores the authors observed (within 0.015), and checks that unparsable
+  LaTeX and a missing crop get `precheck_reject` and `missing_original_image` while the rest of the batch is scored.
+  It needs the worker environment, Chromium, `node` and Noto Sans CJK.
 
 `PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, now `1-3`), `PDF_OCR_MODELS_DIR`,
 `PDF_OCR_CER_BOUND`, `PDF_OCR_READERS` (default `minicpm,paddle`) and `PDF_OCR_WORKER_ENV` (the worker's
