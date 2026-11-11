@@ -2,6 +2,13 @@
 Block label, and the clean-up of a raw Reading. The model itself runs in the worker (worker/)."""
 from __future__ import annotations
 
+import re
+from types import MappingProxyType
+from typing import Final, Mapping, NamedTuple
+
+from block_reader import judge_category
+from script_repair import NO_REPAIR_LABELS
+
 TEXT_PROMPT = "Text Recognition:"
 TABLE_PROMPT = "Table Recognition:"
 FORMULA_PROMPT = "Formula Recognition:"
@@ -92,19 +99,81 @@ def rewrite_latex_delimiters(text: str, label: str) -> str:
     return text.replace("$", "") if label == "formula_number" else text
 
 
-def clean_reading(raw: str, label: str, *, to_html, strip: bool = True) -> tuple[str, bool]:
-    """Clean one raw Reading (MiniCPM's, or PaddleOCR-VL's with strip=False). Returns (text, whether a
-    repetition loop was cut).
+LATEX_SYMBOLS: Final[Mapping[str, str]] = MappingProxyType({
+    r"\geq": "≥", r"\ge": "≥", r"\geqslant": "≥",
+    r"\leq": "≤", r"\le": "≤", r"\leqslant": "≤",
+    r"\geqq": "≧", r"\leqq": "≦",
+    r"\neq": "≠", r"\ne": "≠",
+    r"\times": "×", r"\div": "÷", r"\pm": "±", r"\approx": "≈", r"\%": "%",
+    r"^\circ": "°", r"^{\circ}": "°", r"\degree": "°",
+    r"\rightarrow": "→", r"\to": "→",
+})
 
-    Order: repetition cut, math delimiters (the pipeline does both next anyway), OTSL to HTML (tables),
-    in-cell line breaks to <br> (tables). The Simplified to Traditional repair is not here: it needs the
-    document (script_repair.py). `to_html` is PaddleX's convert_otsl_to_html, which returns "" for text that
-    is not OTSL.
+
+def _symbol_pattern(command: str) -> str:
+    # A command that ends in a letter must not run on into another letter: \top is not \to followed by p.
+    return re.escape(command) + ("(?![A-Za-z])" if command[-1].isascii() and command[-1].isalpha() else "")
+
+
+# Left to right, one token at a time: a display span (kept), an inline span with the one space before it, a symbol
+# command (longest first), and any other command or backslash pair, which is consumed whole so that no symbol is
+# found inside it (`\left`, `\\%`).
+_TOKEN = re.compile(
+    r"(?P<display> ?\$\$.*?\$\$)"
+    r"|(?P<pad> ?)\$(?P<body>(?:\\.|[^$\\])*)\$"
+    r"|(?P<symbol>" + "|".join(_symbol_pattern(c) for c in sorted(LATEX_SYMBOLS, key=len, reverse=True)) + ")"
+    r"|\\[A-Za-z]+|\\.",
+    re.S)
+
+
+def unwrap_symbols(text: str, label: str) -> tuple[str, int]:
+    """Write each lone symbol command of LATEX_SYMBOLS as its character. Returns (text, how many were written).
+
+    A lone symbol is a bare command outside every math span (`歲\\geq者`), or an inline `$` span holding nothing but
+    the command and whitespace (`$\\geq$`, `$ \\geq $`). Such a span is replaced by the character, delimiters and
+    inner whitespace included. When its content starts with whitespace, the one space before the span goes too: that
+    is the space the delimiter rewrite puts before `\\(`, so `歲\\(\\geq\\)者` ends up as `歲≥者`. Display spans, spans holding
+    anything more (`$x \\geq 5$`) and an unpaired `$` are left as they are. Only Blocks the Judge rates as text and
+    the script repair also touches are changed: formulas, `formula_number`, `algorithm`, tables, charts, seals and
+    images are returned unchanged. The text is expected after rewrite_latex_delimiters, ours or the pipeline's, so
+    a run without a bridge gets the same result from the pipeline's output.
+    """
+    if judge_category(label) != "text" or label in NO_REPAIR_LABELS:
+        return text, 0
+    written = 0
+
+    def replace(m: re.Match) -> str:
+        nonlocal written
+        if m["symbol"]:
+            written += 1
+            return LATEX_SYMBOLS[m["symbol"]]
+        body = m["body"]
+        if body is not None and body.strip() in LATEX_SYMBOLS:
+            written += 1
+            return ("" if body[:1].isspace() else m["pad"]) + LATEX_SYMBOLS[body.strip()]
+        return m[0]
+
+    return _TOKEN.sub(replace, text), written
+
+
+class Cleaned(NamedTuple):
+    text: str
+    repetition_cut: bool
+    symbols_unwrapped: int
+
+
+def clean_reading(raw: str, label: str, *, to_html, strip: bool = True) -> Cleaned:
+    """Clean one raw Reading (MiniCPM's, or PaddleOCR-VL's with strip=False).
+
+    Order: repetition cut, math delimiters (the pipeline does both next anyway), lone symbols written as
+    their character (unwrap_symbols; text Blocks only), OTSL to HTML (tables), in-cell line breaks to <br>
+    (tables). The Simplified to Traditional repair is not here: it needs the document (script_repair.py).
+    `to_html` is PaddleX's convert_otsl_to_html, which returns "" for text that is not OTSL.
     """
     text = raw.strip() if strip else raw
     cut = truncate_repetitive_content(text, min_count=5000 if label == "table" else 50)
     was_cut = cut != text
-    text = rewrite_latex_delimiters(cut, label)
+    text, unwrapped = unwrap_symbols(rewrite_latex_delimiters(cut, label), label)
     if label == "table":
         html = to_html(text)
         if html:
@@ -112,4 +181,4 @@ def clean_reading(raw: str, label: str, *, to_html, strip: bool = True) -> tuple
         # MiniCPM writes an in-cell line break as a real newline; PaddleOCR-VL as a literal backslash + n.
         # The HTML has no newlines between its tags, so every newline is inside a cell.
         text = text.replace("\\n", "<br>").replace("\n", "<br>")
-    return text, was_cut
+    return Cleaned(text, was_cut, unwrapped)

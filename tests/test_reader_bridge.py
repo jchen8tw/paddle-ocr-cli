@@ -47,6 +47,15 @@ def test_readings_are_cleaned_before_the_pipeline_sees_them_and_cuts_are_counted
     assert b.repetition_cuts == 1
 
 
+def test_lone_symbols_are_unwrapped_before_the_pipeline_sees_them_and_every_reading_is_counted(tmp_path):
+    client = FakeClient({"Text Recognition:": r"年滿15足歲$\geq$者"}, default_score=0.5)
+    b = MiniCPMBridge(client, tmp_path, to_html=lambda s: "", judge=True, judge_threshold=0.98)
+    out = list(b.predict([item("OCR:", "text")], max_new_tokens=8192))
+    assert out[0]["result"] == "年滿15足歲≥者"
+    readings = sum(1 if d is None else d["n"] for d in client.decodes)
+    assert readings > 1 and b.symbols_unwrapped == readings  # re-reads included, one symbol each
+
+
 def test_a_query_without_a_label_falls_back_to_its_prompt_text(tmp_path):
     client = FakeClient()
     list(bridge(client, tmp_path).predict(
