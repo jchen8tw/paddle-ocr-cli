@@ -273,3 +273,38 @@ def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path
     assert pdf_ocr.main([*argv, "--no-page-markers"]) == 0
     assert "1 Documents: 1 written, 0 skipped, 0 failed" in capsys.readouterr().err
     assert "<!-- page 1 -->" not in (tmp_path / "out" / "a" / "a.md").read_text(encoding="utf-8")
+
+
+# --- the PDFs a Run opened are closed when it ends -------------------------------------------------------------------
+
+@pytest.fixture
+def opened(monkeypatch):
+    """The Documents that `open_document` hands out during the test."""
+    documents, real = [], pdf_ocr.open_document
+
+    def recording(path, pages):
+        documents.append(real(path, pages))
+        return documents[-1]
+
+    monkeypatch.setattr(pdf_ocr, "open_document", recording)
+    return documents
+
+
+def test_a_single_pdf_run_closes_its_pdf(tmp_path, loaded, opened):
+    pdf = blank_pdf(tmp_path / "a.pdf")
+    assert pdf_ocr.main([str(pdf), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 0
+    assert len(opened) == 1 and opened[0].pdf.raw is None
+
+
+def test_a_folder_run_closes_every_pdf_also_of_a_document_that_raised(tmp_path, loaded, opened, monkeypatch):
+    folder = folder_of(tmp_path, "a.pdf", "boom.pdf")
+    real = pdf_ocr.transcribe_document
+
+    def flaky(engine, args, document, out_dir, started=None):
+        if document.path.name == "boom.pdf":
+            raise RuntimeError("the disk is full")
+        return real(engine, args, document, out_dir, started)
+
+    monkeypatch.setattr(pdf_ocr, "transcribe_document", flaky)
+    assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 1
+    assert len(opened) == 2 and all(d.pdf.raw is None for d in opened)
