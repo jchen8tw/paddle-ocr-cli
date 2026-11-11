@@ -165,8 +165,8 @@ class WorkerJudge:
             try:
                 payload.append((k, {"key": item.key, "image": str(self.crops.path(item.image_key or item.key, item.image)),
                                     "text": item.text, "category": item.category}))
-            except OSError as e:
-                results[k] = JudgeVerdict("encode_error", None, str(e))
+            except Exception as e:  # OSError, or cv2.error on a degenerate crop: this Reading only, not the page's batch
+                results[k] = JudgeVerdict("encode_error", None, f"{type(e).__name__}: {e}")
         if payload:
             answers = self.client.score([p for _, p in payload])
             if len(answers) != len(payload):
@@ -250,8 +250,9 @@ SAMPLE_TOP_P = 0.8
 
 
 class _MiniCPMRead:
-    """MiniCPM-OCR-1.0 in the worker: every round of the schedule. A failure in a re-read round is returned for that
-    Block (the Block keeps its best Reading so far); in round 1 it propagates and fails the page."""
+    """MiniCPM-OCR-1.0 in the worker: every round of the schedule. A failure in a re-read round (the worker's, or
+    preparing the image) is returned for that Block (the Block keeps its best Reading so far); in round 1 it
+    propagates and fails the page."""
 
     def __init__(self, client, crops: CropFiles | None, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
@@ -269,7 +270,7 @@ class _MiniCPMRead:
             try:
                 path = self.crops.path(r.key if step.scale == 1.0 else f"{r.key}@{step.scale:g}", block_image(r, step.scale))
                 answers.append([x["text"] for x in self.client.read(path, prompt, limit, decode=decode)])
-            except WorkerError as e:
+            except Exception as e:  # WorkerError, or a failure preparing the image (cv2.error ...)
                 if step.round == 1:
                     raise
                 answers.append(e)
