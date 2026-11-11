@@ -1,6 +1,7 @@
 """Re-reading low-Score Blocks (ticket #5), at the "read a Block" seam: a fake Reader and a fake Judge.
 
-The schedule (each step runs only while the best Score so far is below the threshold):
+The schedule (each step runs only while the best Score so far is below the threshold and the step before it read a
+text not read before):
     round 1  greedy, 1x          (the first Reading)
     round 2  greedy, 1.25x
     round 3  4 samples, temperature 0.3
@@ -199,26 +200,56 @@ def test_an_unusable_first_reading_keeps_the_block_flagged_when_a_re_read_reache
 # ------------------------------------------------------------------ duplicates
 
 def test_duplicate_texts_are_scored_once_and_listed_once():
-    reader = ScriptedReader({("a", 2): first(), ("a", 3): ["s", "s", "s", first()], ("a", 4): ["s"] * 4})
+    reader = ScriptedReader({("a", 2): "s", ("a", 3): ["s", "t", "s", first()], ("a", 4): ["s", "t", "u", "s"]})
     judge = ScriptedJudge()
     out = read_block(req("a"), reader, judge, settings())
-    assert sorted(judge.shown) == sorted([first(), "s"])
-    assert [r.text for r in out.readings] == [first(), "s"]
-    assert [r.duplicates for r in out.readings] == [2, 6]  # the Readings are counted, not hidden
+    assert sorted(judge.shown) == sorted([first(), "s", "t", "u"])
+    assert [r.text for r in out.readings] == [first(), "s", "t", "u"]
+    assert [r.duplicates for r in out.readings] == [1, 4, 1, 0]  # the Readings are counted, not hidden
     assert out.stop_reason == "exhausted"
 
 
 def test_a_round_whose_readings_are_all_duplicates_makes_no_judge_call():
-    reader = ScriptedReader({("a", 2): first(), ("a", 3): [first()] * 4, ("a", 4): [first()] * 4})
+    reader = ScriptedReader({("a", 2): first()})
     judge = ScriptedJudge()
     read_block(req("a"), reader, judge, settings())
-    assert len(judge.calls) == 1
+    assert reader.rounds == [1, 2] and len(judge.calls) == 1
 
 
 def test_duplicates_count_against_the_ten_reading_cap():
-    reader = ScriptedReader({("a", 2): first(), ("a", 3): [first()] * 4, ("a", 4): [first()] * 4})
+    steps = (*SCHEDULE, ReadStep(5, "temperature", 0.9, 1.0, 4))
+    reader = ScriptedReader({("a", 2): "s", ("a", 3): [first()] * 3 + ["t"], ("a", 4): [first()] * 3 + ["u"]})
+    out = read_block(req("a"), reader, ScriptedJudge(), settings(schedule=steps))
+    assert out.readings[0].duplicates == 6 and len(out.readings) == 4
+    assert 5 not in reader.rounds  # 4 distinct texts, but 10 Readings made
+
+
+# ------------------------------------------------------------------ a round that reads no new text
+
+def test_a_round_that_reads_no_new_text_stops_that_block_while_the_others_in_the_batch_go_on():
+    reader = ScriptedReader({("a", 2): first("a")})
+    a, b = read_blocks([req("a"), req("b")], reader, ScriptedJudge(), settings())
+    assert [(c[0], c[1]) for c in reader.calls] == [(1, ["a", "b"]), (2, ["a", "b"]), (3, ["b"]), (4, ["b"])]
+    assert (a.stop_reason, b.stop_reason) == ("no_new_text", "exhausted")
+    assert (a.text, a.score, a.flagged) == (first("a"), 0.5, True)
+    assert [(r.text, r.duplicates) for r in a.readings] == [(first("a"), 1)]
+
+
+def test_a_sampled_round_whose_samples_all_repeat_earlier_texts_stops_the_block_before_the_next_round():
+    reader = ScriptedReader({("a", 2): "second", ("a", 3): ["second", first(), "second", "second"]})
     out = read_block(req("a"), reader, ScriptedJudge(), settings())
-    assert out.readings[0].duplicates == 9
+    assert reader.rounds == [1, 2, 3]
+    assert out.stop_reason == "no_new_text"
+    assert [r.text for r in out.readings] == [first(), "second"]
+
+
+def test_already_read_means_the_same_text_after_clean_up_so_a_change_in_inner_whitespace_is_new():
+    padded = ScriptedReader({("a", 2): f"  {first()} "})  # the test's clean strips the ends
+    assert read_block(req("a"), padded, ScriptedJudge(), settings()).stop_reason == "no_new_text"
+    spaced = ScriptedReader({("a", 2): "a  r1.0"})
+    out = read_block(req("a"), spaced, ScriptedJudge(), settings())
+    assert spaced.rounds == [1, 2, 3, 4]
+    assert [r.text for r in out.readings][:2] == [first(), "a  r1.0"]
 
 
 # ------------------------------------------------------------------ batching

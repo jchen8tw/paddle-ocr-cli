@@ -30,8 +30,27 @@ def read_page(bridge, items, page=0):
     return [r["result"] for r in bridge.predict(items, max_new_tokens=8192)]
 
 
+class ScaleSensitiveClient(FakeClient):
+    """Reads a crop whose (height, width) is in `by_shape` greedily as that text. FakeClient reads a Block's 1.25x
+    crop as the same text as its 1x crop, which ends the re-reading after round 2; this lets the sampled rounds run."""
+
+    def __init__(self, by_shape, **kw):
+        super().__init__(**kw)
+        self.by_shape = by_shape
+
+    def read(self, image, prompt, max_new_tokens, *, decode=None, timeout=None):
+        out = super().read(image, prompt, max_new_tokens, decode=decode, timeout=timeout)
+        text = self.by_shape.get(cv2.imread(str(image)).shape[:2])
+        if decode is None and text is not None:
+            out[0]["text"] = text
+        return out
+
+
+AT_1_25X = {(10, 20): "read again at 1.25x"}  # the default item's 8x16 crop, enlarged
+
+
 def test_a_low_scoring_block_is_read_greedily_at_1x_then_at_1_25x_then_sampled_twice_with_seeds(tmp_path):
-    client = FakeClient(default_score=0.5)
+    client = ScaleSensitiveClient(AT_1_25X, default_score=0.5)
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", index=7)], page=2)
     assert client.decodes == [
@@ -47,7 +66,7 @@ def test_the_scaled_crop_is_the_blocks_own_crop_made_1_25_times_larger_and_the_j
     assert scaled_image(img, 1.25).shape == (10, 20, 3)
     sizes = []
 
-    class Spy(FakeClient):
+    class Spy(ScaleSensitiveClient):
         def read(self, image, prompt, max_new_tokens, **kw):
             sizes.append(cv2.imread(str(image)).shape[:2])
             return super().read(image, prompt, max_new_tokens, **kw)
@@ -56,9 +75,10 @@ def test_the_scaled_crop_is_the_blocks_own_crop_made_1_25_times_larger_and_the_j
             sizes.append(("score", [cv2.imread(i["image"]).shape[:2] for i in items]))
             return super().score(items, **kw)
 
-    b = minicpm(Spy(default_score=0.5), tmp_path)
+    b = minicpm(Spy({(50, 100): "read again at 1.25x"}, default_score=0.5), tmp_path)
     read_page(b, [item("OCR:", "text", shape=(40, 80))])
     assert sizes[0] == (40, 80) and sizes[2] == (50, 100)
+    assert sizes[3] == ("score", [(40, 80)])  # round 2's Reading is judged against the 1x crop
     assert all(s[1] == [(40, 80)] * len(s[1]) for s in sizes if s[0] == "score")
 
 
@@ -69,29 +89,29 @@ def test_a_block_that_passes_is_read_and_scored_once(tmp_path):
 
 
 def test_the_whole_page_is_re_read_in_batches_of_the_blocks_still_low(tmp_path):
-    client = FakeClient({"Text Recognition:": "low", "Table Recognition:": "high"},
-                        scores={"low": ("scored", 0.5), "high": ("scored", 0.99)})
+    client = ScaleSensitiveClient(AT_1_25X, texts={"Text Recognition:": "low", "Table Recognition:": "high"},
+                                  scores={"low": ("scored", 0.5), "high": ("scored", 0.99)})
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", (0, 0, 1, 1), 0), item("Table Recognition:", "table", (2, 2, 3, 3), 1)])
     assert [d is None for d in client.decodes].count(True) == 3      # text: rounds 1, 2; table: round 1
-    # one Judge call for the page's first Readings, then one per later round that produced something new: round 2
-    # read the same text again (not scored again) and round 3's samples score 0.99, so only the low Block is in them
-    assert [len(c) for c in client.score_calls] == [2, 4]
+    # one Judge call for the page's first Readings, then one for round 2 with only the low Block's new Reading in it,
+    # which scores 0.99 and ends the re-reading
+    assert [len(c) for c in client.score_calls] == [2, 1]
 
 
 def test_samples_are_judged_as_separate_readings_with_unique_keys_but_one_crop_file(tmp_path):
-    client = FakeClient(default_score=0.5)
+    client = ScaleSensitiveClient(AT_1_25X, default_score=0.5)
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text")])
     keys = [i["key"] for call in client.score_calls for i in call]
-    assert len(keys) == len(set(keys))
+    assert len(set(keys)) == len(keys) == 1 + 1 + 4 + 4
     assert list(tmp_path.iterdir()) == []
 
 
 def test_the_seed_belongs_to_the_block_not_to_its_position_in_the_pipelines_call(tmp_path):
     seeds = []
     for first_block in (False, True):
-        client = FakeClient(default_score=0.5)
+        client = ScaleSensitiveClient(AT_1_25X, default_score=0.5)
         b = minicpm(client, tmp_path)
         items = [item("OCR:", "text", (9, 9, 19, 19), index=5)]
         if first_block:
@@ -102,13 +122,13 @@ def test_the_seed_belongs_to_the_block_not_to_its_position_in_the_pipelines_call
 
 
 def test_a_worker_error_in_a_sampled_round_keeps_the_best_reading_and_does_not_fail_the_page(tmp_path):
-    class OOM(FakeClient):
+    class OOM(ScaleSensitiveClient):
         def read(self, image, prompt, max_new_tokens, *, decode=None, timeout=None):
             if decode is not None:
                 raise WorkerError("worker error: OutOfMemoryError: CUDA out of memory")
             return super().read(image, prompt, max_new_tokens, decode=decode, timeout=timeout)
 
-    b = minicpm(OOM(default_score=0.5), tmp_path)
+    b = minicpm(OOM(AT_1_25X, default_score=0.5), tmp_path)
     assert read_page(b, [item("OCR:", "text")]) == ["text for Text Recognition:"]
     out = b.outcomes[(0, (0, 0, 10, 10))]
     assert out.stop_reason == "reader_error" and "out of memory" in out.stop_detail
@@ -143,8 +163,10 @@ def test_a_crop_that_cannot_be_written_for_the_judge_is_an_encode_error_not_a_fa
 # ----------------------------------------------------------------------------- --reader paddle
 
 class FakePaddle:
-    def __init__(self, texts, fail_on_round2=False):
-        self.texts, self.calls, self.fail = texts, [], fail_on_round2
+    """Reads by query, or by image (height, width) when that is in `by_shape` (as ScaleSensitiveClient does)."""
+
+    def __init__(self, texts, fail_on_round2=False, by_shape=None):
+        self.texts, self.calls, self.fail, self.by_shape = texts, [], fail_on_round2, by_shape or {}
 
     def predict(self, inputs, **kw):
         inputs = list(inputs)
@@ -152,7 +174,7 @@ class FakePaddle:
         if self.fail and len(self.calls) == 2:
             raise RuntimeError("paddle blew up")
         for i in inputs:
-            yield {"result": self.texts[str(i["query"])]}
+            yield {"result": self.by_shape.get(i["image"].shape[:2], self.texts[str(i["query"])])}
 
 
 def paddle(client, tmp_path, texts, **kw):
@@ -162,14 +184,22 @@ def paddle(client, tmp_path, texts, **kw):
 
 def test_paddle_cannot_sample_so_it_only_gets_the_1_25x_round_and_the_sampled_rounds_are_recorded_as_skipped(tmp_path):
     client = FakeClient(default_score=0.5)
-    b, real = paddle(client, tmp_path, {"OCR:": "words"})
+    b, real = paddle(client, tmp_path, {"OCR:": "words"}, by_shape={(50, 100): "words, read again"})
     assert read_page(b, [item("OCR:", "text", shape=(40, 80))]) == ["words"]
     assert real.calls == [[(40, 80)], [(50, 100)]]
     out = b.outcomes[(0, (0, 0, 10, 10))]
     assert [s["round"] for s in out.skipped_rounds] == [3, 4]
-    assert out.stop_reason == "exhausted" and [r.round for r in out.readings] == [1]  # round 2 read the same text
-    assert out.readings[0].duplicates == 1
+    assert out.stop_reason == "exhausted" and [r.round for r in out.readings] == [1, 2]
     assert [b.supports(s) for s in __import__("block_reader").SCHEDULE] == [True, True, False, False]
+
+
+def test_paddle_reading_the_same_text_at_1_25x_stops_the_re_reading_before_the_rounds_it_cannot_do(tmp_path):
+    b, real = paddle(FakeClient(default_score=0.5), tmp_path, {"OCR:": "words"})
+    assert read_page(b, [item("OCR:", "text")]) == ["words"]
+    assert len(real.calls) == 2
+    out = b.outcomes[(0, (0, 0, 10, 10))]
+    assert out.stop_reason == "no_new_text" and out.skipped_rounds == []
+    assert [(r.round, r.duplicates) for r in out.readings] == [(1, 1)]
 
 
 def test_a_paddle_failure_in_round_2_keeps_the_first_reading(tmp_path):

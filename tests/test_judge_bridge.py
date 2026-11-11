@@ -35,7 +35,7 @@ def read_page(bridge, items, page=0, **kw):
 def test_every_judged_block_gets_a_score_verdict_and_flag_keyed_by_page_and_bbox(tmp_path):
     client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.9)}, default_score=0.5)
     b = minicpm(client, tmp_path)
-    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4))], page=4) == ["words"]  # re-reads scored lower
+    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4))], page=4) == ["words"]  # round 2 reads it again
     out = b.outcomes[(4, (1, 2, 3, 4))]
     assert (out.score, out.verdict, out.flagged) == (0.9, "scored", True)
 
