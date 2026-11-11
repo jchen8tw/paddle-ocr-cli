@@ -237,6 +237,9 @@ def missing_models_message(args) -> str | None:
             f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
 
 
+WORKER_FREE = "a run without --reader minicpm and --judge does not need it"  # true while needs_worker() is that rule
+
+
 def worker_env_path() -> Path:
     return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
 
@@ -253,7 +256,7 @@ def worker_env_problem() -> str | None:
     if path.is_dir():
         return None
     return (f"the worker environment (MiniCPM-OCR-1.0 and the Judge) is not set up ({path} not found). "
-            "Create it once with:  uv sync --project worker   (--reader paddle --no-judge runs without it)")
+            f"Create it once with:  uv sync --project worker   ({WORKER_FREE})")
 
 
 def worker_environment() -> dict:
@@ -281,8 +284,8 @@ def start_worker(args):
 
     uv = shutil.which("uv")
     if not uv:
-        sys.exit("error: `uv` is not on PATH; it starts the torch worker (MiniCPM-OCR-1.0, the Judge) "
-                 "(install uv, or use --reader paddle --no-judge)")
+        sys.exit("error: `uv` is not on PATH; it starts the torch worker for --reader minicpm and --judge "
+                 f"(install uv; {WORKER_FREE})")
     if problem := worker_env_problem():
         sys.exit(f"error: {problem}")
     client = WorkerClient(worker_command(args, uv), env=worker_environment())
@@ -362,7 +365,7 @@ def attach_worker(args, pipe, stack, ink, doc_hash: str):
     try:
         reader_bridge.check_hook_support(pipe)
     except reader_bridge.HookUnsupported as e:
-        sys.exit(f"error: {e}")
+        sys.exit(f"error: {e} The hook is used by --reader minicpm and --judge; {WORKER_FREE}.")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
     judge = args.judge
@@ -707,14 +710,27 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
-def memory_hint(errors: dict, outcomes: dict) -> str | None:
+# (reader, judge) -> what to try. Peaks measured on pages 38-58 of one document (README, "Readers compared"):
+# PaddleOCR-VL alone 9,657 MiB, MiniCPM-OCR-1.0 alone 5,408 MiB.
+MEMORY_WAYS_OUT = {
+    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
+                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
+                       "environment)",
+    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
+    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
+                       "--judge",
+    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
+                      "tightest combination; close other GPU programs, run without --judge, or use "
+                      "--reader minicpm --judge",
+}
+
+
+def memory_hint(args, errors: dict, outcomes: dict) -> str | None:
     """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
     texts = [*errors.values(), *(f"{o.verdict_detail or ''} {o.stop_detail or ''}" for o in outcomes.values())]
     if not any("out of memory" in t.lower() for t in texts):
         return None
-    return ("hint: the GPU ran out of memory. The Judge and the Reader need to fit next to each other and to whatever "
-            "else uses the GPU; close other GPU programs, or run with --no-judge or --reader minicpm "
-            "(--reader paddle with the Judge is the tightest combination)")
+    return f"hint: the GPU ran out of memory: {MEMORY_WAYS_OUT[args.reader, args.judge]}"
 
 
 def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
@@ -967,7 +983,8 @@ def _transcribe(args, stack) -> int:
     if needs_worker(args) and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
     if args.judge and (problems := judge_setup_problems()):
-        sys.exit("error: the Judge's renderer is not set up (or use --no-judge):\n  - " + "\n  - ".join(problems))
+        sys.exit("error: --judge needs the Judge's renderer, which is not set up (or run without --judge):\n  - "
+                 + "\n  - ".join(problems))
     try:
         pdf = pdfium.PdfDocument(str(args.pdf))
     except pdfium.PdfiumError as e:
@@ -1081,7 +1098,7 @@ def _transcribe(args, stack) -> int:
         "pages": [pages[i] for i in sorted(pages)],
     }
     json_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    if hint := memory_hint(errors, outcomes):
+    if hint := memory_hint(args, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)

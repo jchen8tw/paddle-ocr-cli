@@ -265,23 +265,74 @@ def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
 
 # --- a run that ran out of GPU memory says what to do ---------------------------------------------------
 
-def test_a_page_error_or_a_verdict_detail_about_memory_gives_one_hint_naming_the_ways_out():
+OOM_PAGE = {3: "RuntimeError: CUDA out of memory. Tried to allocate"}
+
+
+@pytest.mark.parametrize("argv, ways_out", [
+    ((), ["close other GPU programs", "--reader minicpm"]),
+    (("--reader", "minicpm"), ["close other GPU programs", "smallest"]),
+    (("--reader", "minicpm", "--judge"), ["close other GPU programs", "without --judge"]),
+    (("--judge",), ["close other GPU programs", "without --judge", "--reader minicpm --judge", "tightest"]),
+])
+def test_the_memory_hint_names_the_ways_out_of_the_configuration_that_ran(argv, ways_out):
+    hint = pdf_ocr.memory_hint(args(*argv), OOM_PAGE, {})
+    assert hint.startswith("hint: the GPU ran out of memory")
+    assert all(w in hint for w in ways_out)
+
+
+def test_a_verdict_detail_about_memory_gives_the_hint_too():
     oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", below_threshold=True)
-    for errors, outcomes in (({3: "RuntimeError: CUDA out of memory. Tried to allocate"}, {}), ({}, {(0, (0, 0, 1, 1)): oom})):
-        hint = pdf_ocr.memory_hint(errors, outcomes)
-        assert "--no-judge" in hint and "--reader minicpm" in hint and "GPU" in hint
+    assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_a_re_read_that_ran_out_of_memory_also_gives_the_hint():
     oom = outcome(judged=True, verdict="scored", score=0.5, below_threshold=True, readings=[], stop_reason="reader_error",
                   stop_detail="round 3: worker error: OutOfMemoryError: CUDA out of memory")
-    assert "GPU" in pdf_ocr.memory_hint({}, {(0, (0, 0, 1, 1)): oom})
+    assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_other_failures_give_no_memory_hint():
     other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
-    assert pdf_ocr.memory_hint({1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
-    assert pdf_ocr.memory_hint({}, {}) is None
+    assert pdf_ocr.memory_hint(args("--judge"), {1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
+    assert pdf_ocr.memory_hint(args(), {}, {}) is None
+
+
+def hook_unsupported_messages():
+    import reader_bridge
+
+    class Renamed:
+        vl_rec_model = None
+
+    class Wide:
+        vl_rec_model = None
+
+        def _paddleocr_vl_collect_page_vlm_entries_core(self, page_idx, blocks_for_img, imgs_in_doc, cfg):
+            return [(0, 0, "img", "OCR:", (1, 2), None, "new field")], [], []
+
+    texts = []
+    wide = types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(_pipeline=Wide()))
+    reader_bridge.install_reader_hook(wide, object())
+    for attempt in (lambda: reader_bridge.check_hook_support(types.SimpleNamespace()),
+                    lambda: reader_bridge.check_hook_support(
+                        types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(_pipeline=Renamed()))),
+                    lambda: wide.paddlex_pipeline._pipeline._paddleocr_vl_collect_page_vlm_entries_core(
+                        0, [{"label": "text", "box": [0, 0, 1, 1]}], [], {})):
+        with pytest.raises(reader_bridge.HookUnsupported) as e:
+            attempt()
+        texts.append(str(e.value))
+    return texts
+
+
+def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monkeypatch, tmp_path):
+    monkeypatch.setenv("PDF_OCR_WORKER_ENV", str(tmp_path / "missing"))
+    monkeypatch.setattr(pdf_ocr.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit) as no_uv:
+        pdf_ocr.start_worker(args("--reader", "minicpm"))
+    messages = [pdf_ocr.worker_env_problem(), str(no_uv.value.code), *hook_unsupported_messages(),
+                *(pdf_ocr.memory_hint(args(*a), OOM_PAGE, {}) for a in
+                  ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]
+    for msg in messages:
+        assert "--no-judge" not in msg and "--reader paddle" not in msg, msg
 
 
 def test_judged_blocks_without_an_outcome_are_found_by_page_and_box():
