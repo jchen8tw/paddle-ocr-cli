@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import warnings
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -936,6 +937,65 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
         print(f"warning: table on page {s['page']} (block {s['block_id']}) not exported to CSV: {s['reason']}",
               file=sys.stderr)
     return {"exported": exported, "skipped": skipped}
+
+
+@dataclass(frozen=True)
+class PlannedDocument:
+    """One Document of a folder Run: the PDF as found under the folder (a symlink stays a symlink), its path relative
+    to the folder, and the folder its files go to."""
+    path: Path
+    relative: Path
+    out_dir: Path
+
+
+class PlanError(Exception):
+    """A folder Run that cannot start: it has no Documents, a folder cannot be read, or Documents would write over
+    each other."""
+
+
+def find_pdfs(folder: Path) -> list[Path]:
+    """The paths, relative to `folder`, of every Document under it, in order: a file whose name ends in .pdf in any
+    case. Names starting with "." are skipped at any depth. A symlinked file counts and a symlinked folder is not
+    entered, so a link cannot make the search endless or reach outside the tree."""
+    def unreadable(e: OSError):
+        raise PlanError(f"cannot read {e.filename}: {e.strerror}")
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        found += [Path(dirpath, f).relative_to(folder) for f in filenames
+                  if f.lower().endswith(".pdf") and not f.startswith(".")]
+    return sorted(found, key=lambda rel: rel.parts)
+
+
+def refuse_collisions(documents: list[PlannedDocument]) -> None:
+    """Raise a PlanError naming the Documents that would write over each other: two with one output folder, or one
+    whose output folder lies inside another's imgs/ or csv/."""
+    by_dir: dict[Path, list[PlannedDocument]] = {}
+    for d in documents:
+        by_dir.setdefault(d.out_dir, []).append(d)
+    problems = [f"{', '.join(str(d.relative) for d in same)} all write to {out_dir}"
+                for out_dir, same in by_dir.items() if len(same) > 1]
+    for d in documents:
+        for folder in (d.out_dir, *d.out_dir.parents):
+            if folder.name in ("imgs", "csv"):
+                problems += [f"{d.relative} writes to {d.out_dir}, inside the {folder.name}/ of {outer.relative}"
+                             for outer in by_dir.get(folder.parent, [])]
+    if problems:
+        raise PlanError("the output folders of these Documents collide (nothing was written):\n  "
+                        + "\n  ".join(problems))
+
+
+def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
+    """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
+    with the folder it writes to. `output_root` is `-o`, or None for output/<name of the resolved folder>.
+    Raises PlanError for a folder without Documents and for colliding output folders."""
+    root = output_root if output_root is not None else Path("output") / folder.resolve().name
+    documents = [PlannedDocument(folder / rel, rel, root / rel.parent / rel.stem) for rel in find_pdfs(folder)]
+    if not documents:
+        raise PlanError(f"no PDF found under {folder}")
+    refuse_collisions(documents)
+    return documents
 
 
 class DocumentError(Exception):
