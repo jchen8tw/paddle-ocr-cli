@@ -28,8 +28,7 @@ def render_first_page(pdf_path, dpi=216.0):
 
 
 def test_every_block_of_a_real_page_goes_through_the_bridge_with_its_label(sample_pdf, layout_models_dir, tmp_path):
-    args = pdf_ocr.build_parser().parse_args([str(sample_pdf), "--models-dir", str(layout_models_dir)])
-    assert args.reader == "minicpm"
+    args = pdf_ocr.parse_args([str(sample_pdf), "--reader", "minicpm", "--models-dir", str(layout_models_dir)])
     pipe = pdf_ocr.build_pipeline(args, pdf_ocr.pick_device(None))  # only the Layout model is loaded
     check_hook_support(pipe)
 

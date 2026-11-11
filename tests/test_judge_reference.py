@@ -31,7 +31,7 @@ def client():
         pytest.skip(problem)
     if problems := pdf_ocr.judge_setup_problems():
         pytest.skip("; ".join(problems))
-    args = pdf_ocr.build_parser().parse_args(["x.pdf", "--reader", "paddle", "--models-dir", str(models)])
+    args = pdf_ocr.parse_args(["x.pdf", "--reader", "paddle", "--judge", "--models-dir", str(models)])
     c = WorkerClient(pdf_ocr.worker_command(args, "uv"), env=pdf_ocr.worker_environment())
     try:
         c.start()

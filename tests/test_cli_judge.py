@@ -8,44 +8,58 @@ from block_reader import BlockResult, Reading
 
 
 def args(*argv):
-    return pdf_ocr.build_parser().parse_args(["in.pdf", *argv])
+    return pdf_ocr.parse_args(["in.pdf", *argv])
 
 
-def test_the_judge_is_on_by_default_with_the_official_threshold():
+def test_the_judge_is_off_by_default_and_judge_turns_it_on_with_the_official_threshold():
     a = args()
-    assert a.no_judge is False and a.judge_threshold == 0.5
-    assert args("--no-judge").no_judge is True
-    assert args("--judge-threshold", "0.9").judge_threshold == 0.9
+    assert a.reader == "paddle" and a.judge is False and a.judge_threshold is None
+    assert args("--judge").judge is True and args("--judge").judge_threshold == 0.5
+    assert args("--no-judge").judge is False and args("--no-judge").judge_threshold is None
+    assert args("--reader", "minicpm").judge is False
+    assert args("--judge", "--judge-threshold", "0.7").judge_threshold == 0.7
+    assert args("--judge", "--no-judge").judge is False and args("--no-judge", "--judge").judge is True
+
+
+@pytest.mark.parametrize("argv", [["--judge-threshold", "0.7"], ["--no-judge", "--judge-threshold", "0.7"],
+                                  ["--judge-threshold", "0.7", "--no-judge"], ["--judge-thr", "0.7"]])
+def test_a_judge_threshold_without_the_judge_is_a_usage_error_that_says_to_add_judge(argv, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        args(*argv)
+    assert exit_info.value.code == 2
+    assert "add --judge" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("bad", ["nan", "-0.1", "1.5", "inf", "abc"])
 def test_a_judge_threshold_outside_0_to_1_is_rejected_at_parse_time(bad, capsys):
     with pytest.raises(SystemExit):
-        args("--judge-threshold", bad)
+        args("--judge", "--judge-threshold", bad)
     assert "--judge-threshold" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("ok", ["0", "1", "0.5"])
 def test_the_ends_of_the_judge_threshold_range_are_accepted(ok):
-    assert args("--judge-threshold", ok).judge_threshold == float(ok)
+    assert args("--judge", "--judge-threshold", ok).judge_threshold == float(ok)
 
 
-def test_the_judge_needs_its_model_folder_unless_it_is_off(tmp_path):
-    assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args("--no-judge")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
-    assert pdf_ocr.required_model_dirs(args("--reader", "paddle")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args("--reader", "paddle", "--no-judge")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
-    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(args("--models-dir", str(tmp_path)))
+def test_the_judge_needs_its_model_folder_only_when_it_is_on(tmp_path):
+    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm", "--judge")) == [
+        "PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
+    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
+    assert pdf_ocr.required_model_dirs(args("--judge")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev"]
+    assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
+    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(args("--judge", "--models-dir", str(tmp_path)))
 
 
 def test_the_worker_is_needed_for_minicpm_or_for_the_judge_and_loads_only_what_is_used():
-    assert pdf_ocr.needs_worker(args()) and pdf_ocr.needs_worker(args("--no-judge"))
-    assert pdf_ocr.needs_worker(args("--reader", "paddle"))
-    assert not pdf_ocr.needs_worker(args("--reader", "paddle", "--no-judge"))
+    assert not pdf_ocr.needs_worker(args()) and not pdf_ocr.needs_worker(args("--no-judge"))
+    assert pdf_ocr.needs_worker(args("--reader", "minicpm")) and pdf_ocr.needs_worker(args("--judge"))
+    assert pdf_ocr.needs_worker(args("--reader", "minicpm", "--judge"))
     cmd = lambda *a: pdf_ocr.worker_command(args("--models-dir", "/m", *a), uv="/usr/bin/uv")
-    assert "--no-reader" not in cmd() and "--no-judge" not in cmd()
-    assert "--no-judge" in cmd("--no-judge") and "--no-reader" not in cmd("--no-judge")
-    assert "--no-reader" in cmd("--reader", "paddle") and "--no-judge" not in cmd("--reader", "paddle")
+    both = cmd("--reader", "minicpm", "--judge")
+    assert "--no-reader" not in both and "--no-judge" not in both
+    assert "--no-judge" in cmd("--reader", "minicpm") and "--no-reader" not in cmd("--reader", "minicpm")
+    assert "--no-reader" in cmd("--judge") and "--no-judge" not in cmd("--judge")
 
 
 READY = {"reader": "MiniCPM-OCR-1.0", "judge": "MiniCPM-OCR-Jev",
@@ -53,27 +67,33 @@ READY = {"reader": "MiniCPM-OCR-1.0", "judge": "MiniCPM-OCR-Jev",
 
 
 def test_the_engine_names_the_judge_when_it_is_on():
-    e = pdf_ocr.engine_info(args(), "gpu:0", READY)
+    e = pdf_ocr.engine_info(args("--reader", "minicpm", "--judge"), "gpu:0", READY)
     assert e["judge"] == "MiniCPM-OCR-Jev" and e["playwright"] == "1.62.0"
-    assert "judge" not in pdf_ocr.engine_info(args("--no-judge"), "gpu:0", {**READY, "judge": None})
+    assert "judge" not in pdf_ocr.engine_info(args("--reader", "minicpm"), "gpu:0", {**READY, "judge": None})
 
 
 def test_the_paddle_reader_with_the_judge_has_the_workers_versions_too():
-    e = pdf_ocr.engine_info(args("--reader", "paddle"), "gpu:0", {**READY, "reader": None})
+    e = pdf_ocr.engine_info(args("--judge"), "gpu:0", {**READY, "reader": None})
     assert e["reader"] == "PaddleOCR-VL-1.6" and e["judge"] == "MiniCPM-OCR-Jev" and e["torch"] == "2.15.0+cu132"
 
 
 def test_the_settings_record_whether_the_judge_was_on_and_its_threshold():
-    s = pdf_ocr.settings_info(args("--judge-threshold", "0.9"))
+    s = pdf_ocr.settings_info(args("--reader", "minicpm", "--judge", "--judge-threshold", "0.9"))
     assert s["judge"] is True and s["judge_threshold"] == 0.9 and s["reader"] == "minicpm"
     s = pdf_ocr.settings_info(args("--no-judge"))
     assert s["judge"] is False and s["judge_threshold"] is None
     assert s["reread_short_blocks"] is True  # the ink-based re-read is what runs without the Judge
 
 
+def test_a_run_with_no_options_records_paddle_without_the_judge_and_with_the_ink_based_reread():
+    s = pdf_ocr.settings_info(args())
+    assert (s["reader"], s["judge"], s["judge_threshold"], s["reread_short_blocks"]) == ("paddle", False, None, True)
+    assert "reread_schedule" not in s
+
+
 def test_with_the_judge_on_the_ink_based_reread_is_not_run_and_the_settings_say_so():
-    assert pdf_ocr.settings_info(args())["reread_short_blocks"] is False
-    assert pdf_ocr.settings_info(args("--no-recover", "--no-judge"))["reread_short_blocks"] is False
+    assert pdf_ocr.settings_info(args("--judge"))["reread_short_blocks"] is False
+    assert pdf_ocr.settings_info(args("--no-recover"))["reread_short_blocks"] is False
 
 
 # --- the JSON of a judged Block -------------------------------------------------------------------------
@@ -233,14 +253,14 @@ def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rou
 
 
 def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
-    s = pdf_ocr.settings_info(args())
+    s = pdf_ocr.settings_info(args("--judge"))
     assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
         (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
     assert "supported" not in s["reread_schedule"][0] and s["max_readings_per_block"] == 10
     bridge = types.SimpleNamespace(supports=lambda step: step.decode == "greedy")
-    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"), bridge)["reread_schedule"]] == [
+    assert [r["supported"] for r in pdf_ocr.settings_info(args("--judge"), bridge)["reread_schedule"]] == [
         True, True, False, False]
-    assert "reread_schedule" not in pdf_ocr.settings_info(args("--no-judge"))
+    assert "reread_schedule" not in pdf_ocr.settings_info(args())
 
 
 # --- a run that ran out of GPU memory says what to do ---------------------------------------------------
