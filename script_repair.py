@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Final, Mapping
 
-# Symbols that cannot be encoded in Big5, and the Big5 glyph a Traditional document prints for each.
+# Symbols that cannot be encoded in Big5, and the Big5 glyph a Traditional document gets for each instead.
 BIG5_LOOKALIKES: Final[Mapping[str, str]] = MappingProxyType({"≥": "≧", "≤": "≦"})
 _TO_BIG5_GLYPHS = str.maketrans(dict(BIG5_LOOKALIKES))
 
