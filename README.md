@@ -155,18 +155,19 @@ failed, and 0 otherwise (a skipped Document is never a failure). On stderr, a fo
 found and how many of them are already done (see "Running a folder again"), a note for each of those, `model load: Ns`
 once, a header `[i/n] <relative path> (<pages> pages)` before each processed Document's page lines and its `wrote ...`
 line, and at the end the count and one line for each failure. `i` is the Document's place among all the Documents
-found, `n` their number, so a run that skips some shows gaps in `i`:
+found and `n` their number, whether or not the others are skipped. The notes of the skipped Documents come together
+right after the `found` line, before anything is loaded, so the headers that follow skip those numbers:
 
 ```
-found 4 Documents in scans (1 already done)
+found 4 Documents in scans (2 already done)
 [1/4] 2023/old.pdf skipped: already done
+[4/4] invoice.pdf skipped: already done
+...
 model load: 31.2s
 [2/4] 2024/q1/report.pdf (12 pages)
 ...
 [3/4] broken.pdf FAILED: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
-[4/4] invoice.pdf (2 pages)
-...
-4 Documents: 2 written, 1 skipped, 1 failed
+4 Documents: 1 written, 2 skipped, 1 failed
   broken.pdf: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
 ```
 
