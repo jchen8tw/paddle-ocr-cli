@@ -327,8 +327,8 @@ did, which is the whole difference of the strict column. No threshold changed mo
 no Block ever reached 0.98 (`exhausted` for every Block still below), and at 0.98 the 2,403 extra Readings
 contained only 38 texts that had not been read before.
 
-The default is **0.5**: the highest value tried that still changed a Reading for the better, and the cheapest one
-that does (+23 % time, 14 % of Blocks flagged). That is not a strong calibration: it rests on one fixed Block, and
+The default is **0.5**: the lowest value tried (other than 0) and the cheapest one at which re-reading fixed anything
+(+23 % time, 14 % of Blocks flagged); every higher value made the same fix at a higher cost. That is not a strong calibration: it rests on one fixed Block, and
 with 12 wrong Blocks another pick would be as defensible. The Judge authors' 0.98 is not an option on this evidence:
 it re-reads and flags 83 % of the Blocks and takes 3.5 times as long for nothing more. The flag is a weak review
 queue: at 0.5 it holds 6 of the 12 wrong Blocks among 44 Blocks (14 %); at 0.9, 11 of 12 among 154 (48 %); at 0.95

@@ -41,8 +41,8 @@ WORKER_DIR = ROOT / "worker"  # second uv project: torch + transformers (docs/ad
 
 # Page furniture that is kept in the JSON but left out of the Markdown by default.
 # (PaddleOCR's own default also drops `footnote`; that is real content, so it is kept here.)
-# Measured on pages 38-58 of one document (see the README, "Tuning notes"): 0.5 is the highest value that still
-# changed a Reading for the better; higher values re-read more Blocks (83 % at 0.98) for no further gain.
+# Measured on pages 38-58 of one document (see the README, "Tuning notes"): 0.5 is the lowest value tried at which
+# re-reading fixed anything; higher values made the same fix and re-read more Blocks (83 % at 0.98) for no gain.
 DEFAULT_JUDGE_THRESHOLD = 0.5
 DEFAULT_MD_IGNORE = ["header", "header_image", "footer", "footer_image", "number", "aside_text"]
 MAX_RENDER_PIXELS = 40_000_000  # guard against huge pages exhausting memory at high DPI
