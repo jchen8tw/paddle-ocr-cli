@@ -4,6 +4,7 @@ Runs the real Layout model on the sample's first pages and the real request loop
 (tests/fake_worker.py) as the worker: no MiniCPM weights, but the real main-process path.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -33,7 +34,8 @@ def test_a_run_through_the_worker_records_the_reader_in_the_json(monkeypatch, sa
     assert doc["engine"]["torch"] == "0.0"
     assert doc["postprocessing"]["repetition_cuts"] == 0
     contents = [b["content"] for p in doc["pages"] for b in p["blocks"] if b["label"] not in ("image", "header_image")]
-    assert contents and all("|Recognition:|" in c.replace("Text ", "").replace("Table ", "") for c in contents)
+    # the stand-in worker echoes "<crop>|<prompt>|<token limit>"; the prompt depends on the label (Text, Table, Formula)
+    assert contents and all(re.search(r"\|(Text|Table|Formula) Recognition:\|", c) for c in contents)
 
 
 def test_a_worker_crash_fails_that_page_only_and_the_next_page_gets_a_restarted_worker(
