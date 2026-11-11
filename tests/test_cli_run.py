@@ -1,17 +1,9 @@
 """The order of a single-PDF Run before any model loads: the checks and the opening of the Document fail fast, in
 this order, with nothing loaded (no GPU, no models: a model folder is an empty directory here)."""
-import pypdfium2 as pdfium
 import pytest
 
 import pdf_ocr
-
-
-def blank_pdf(path, pages=1):
-    pdf = pdfium.PdfDocument.new()
-    for _ in range(pages):
-        pdf.new_page(200, 300)
-    pdf.save(str(path))
-    return path
+from fakes import blank_pdf
 
 
 def models_dir(tmp_path):

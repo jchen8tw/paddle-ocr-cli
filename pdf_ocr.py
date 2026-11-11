@@ -3,6 +3,7 @@
 
     python pdf_ocr.py input.pdf                  # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
     python pdf_ocr.py input.pdf -o out --pages 1-5,9
+    python pdf_ocr.py scans/                     # every PDF under scans/ -> output/scans/<sub>/<name>/ (one model load)
     python pdf_ocr.py input.pdf --reader paddle  # PaddleOCR-VL-1.6 instead of MiniCPM-OCR-1.0
 
 Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks -> the Reader
@@ -25,6 +26,7 @@ import sys
 import tempfile
 import time
 import warnings
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -66,12 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pdf_ocr",
         description="Transcribe a PDF to Markdown + JSON with MiniCPM-OCR-1.0 or PaddleOCR-VL-1.6 (local models).",
     )
-    p.add_argument("pdf", type=Path, help="input PDF")
-    p.add_argument("-o", "--output-dir", type=Path, help="output directory (default: output/<pdf stem>)")
+    p.add_argument("pdf", type=Path, metavar="PDF_OR_FOLDER",
+                   help="input PDF, or a folder: every PDF under it (any depth; names starting with '.' are "
+                        "skipped, symlinked folders are not entered) is transcribed in one Run")
+    p.add_argument("-o", "--output-dir", type=Path,
+                   help="output directory (default: output/<pdf stem>; for a folder, output/<folder name>, with "
+                        "one subfolder per Document mirroring its place in the folder)")
     p.add_argument("--models-dir", type=Path, default=ROOT / "models",
                    help=f"folder holding {LAYOUT_MODEL_DIR}/ and the Reader's folder: {MINICPM_MODEL_DIR}/ or "
                         f"{VL_MODEL_DIR}/ with --reader paddle (default: ./models)")
-    p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all)")
+    p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all; not with a folder)")
     p.add_argument("--device", help="paddle device, e.g. gpu:0 or cpu (default: gpu:0 if available)")
 
     g = p.add_argument_group("accuracy")
@@ -938,6 +944,65 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
     return {"exported": exported, "skipped": skipped}
 
 
+@dataclass(frozen=True)
+class PlannedDocument:
+    """One Document of a folder Run: the PDF as found under the folder (a symlink stays a symlink), its path relative
+    to the folder, and the folder its files go to."""
+    path: Path
+    relative: Path
+    out_dir: Path
+
+
+class PlanError(Exception):
+    """A folder Run that cannot start: it has no Documents, a folder cannot be read, or Documents would write over
+    each other."""
+
+
+def find_pdfs(folder: Path) -> list[Path]:
+    """The paths, relative to `folder`, of every Document under it, in order: a file whose name ends in .pdf in any
+    case. Names starting with "." are skipped at any depth. A symlinked file counts and a symlinked folder is not
+    entered, so a link cannot make the search endless or reach outside the tree."""
+    def unreadable(e: OSError):
+        raise PlanError(f"cannot read {e.filename}: {e.strerror}")
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        found += [Path(dirpath, f).relative_to(folder) for f in filenames
+                  if f.lower().endswith(".pdf") and not f.startswith(".")]
+    return sorted(found, key=lambda rel: rel.parts)
+
+
+def refuse_collisions(documents: list[PlannedDocument]) -> None:
+    """Raise a PlanError naming the Documents that would write over each other: two with one output folder, or one
+    whose output folder lies inside another's imgs/ or csv/."""
+    by_dir: dict[Path, list[PlannedDocument]] = {}
+    for d in documents:
+        by_dir.setdefault(d.out_dir, []).append(d)
+    problems = [f"{', '.join(str(d.relative) for d in same)} all write to {out_dir}"
+                for out_dir, same in by_dir.items() if len(same) > 1]
+    for d in documents:
+        for folder in (d.out_dir, *d.out_dir.parents):
+            if folder.name in ("imgs", "csv"):
+                problems += [f"{d.relative} writes to {d.out_dir}, inside the {folder.name}/ of {outer.relative}"
+                             for outer in by_dir.get(folder.parent, [])]
+    if problems:
+        raise PlanError("the output folders of these Documents collide (nothing was written):\n  "
+                        + "\n  ".join(problems))
+
+
+def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
+    """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
+    with the folder it writes to. `output_root` is `-o`, or None for output/<name of the resolved folder>.
+    Raises PlanError for a folder without Documents and for colliding output folders."""
+    root = output_root if output_root is not None else Path("output") / folder.resolve().name
+    documents = [PlannedDocument(folder / rel, rel, root / rel.parent / rel.stem) for rel in find_pdfs(folder)]
+    if not documents:
+        raise PlanError(f"no PDF found under {folder}")
+    refuse_collisions(documents)
+    return documents
+
+
 class DocumentError(Exception):
     """A Document that cannot be transcribed at all: it does not open, has no pages, or --pages does not fit it."""
 
@@ -956,6 +1021,10 @@ def open_document(path: Path, pages: str | None) -> Document:
         pdf = pdfium.PdfDocument(str(path))
     except pdfium.PdfiumError as e:
         raise DocumentError(f"cannot open {path}: {e}") from None
+    except FileNotFoundError:  # a symlink to nothing, in a folder Run
+        raise DocumentError(f"cannot open {path}: no such file") from None
+    except OSError as e:
+        raise DocumentError(f"cannot open {path}: {e.strerror}") from None
     if len(pdf) == 0:
         raise DocumentError(f"{path} has no pages")
     try:
@@ -1129,14 +1198,61 @@ def transcribe(args) -> int:
     return 1 if errors else 0
 
 
+def transcribe_folder(args) -> int:
+    """A Run on every Document under a folder: plan it, check the setup, load the Engine once, then transcribe the
+    Documents one at a time. A Document that fails is reported and the Run goes on."""
+    import contextlib
+    import traceback
+
+    try:
+        plan = plan_run(args.pdf, args.output_dir, args)
+    except PlanError as e:
+        sys.exit(f"error: {e}")
+    print(f"found {len(plan)} Documents in {args.pdf}", file=sys.stderr)
+    check_setup(args)
+    written, failed, partly_failed = 0, [], []  # partly_failed: written, but with failed pages
+    with contextlib.ExitStack() as stack:
+        engine = load_engine(args, stack)
+        for i, planned in enumerate(plan, 1):
+            label = f"[{i}/{len(plan)}] {planned.relative.as_posix()}"
+            document = None
+            try:
+                document = open_document(planned.path, None)
+                print(f"{label} ({document.total} pages)", file=sys.stderr)
+                errors = transcribe_document(engine, args, document, planned.out_dir)
+            except Exception as e:  # the Run goes on; the next Run retries the Document, which has no JSON
+                reason = str(e) if isinstance(e, DocumentError) else f"{type(e).__name__}: {e}"
+                if not isinstance(e, DocumentError):
+                    traceback.print_exc()
+                print(f"{label} FAILED: {reason}", file=sys.stderr)
+                failed.append(f"{planned.relative.as_posix()}: {reason}")
+            else:
+                written += 1
+                if errors:
+                    pages = ", ".join(str(idx + 1) for idx in sorted(errors))
+                    partly_failed.append(f"{planned.relative.as_posix()}: {'page' if len(errors) == 1 else 'pages'} "
+                                         f"{pages} failed (recorded in its JSON)")
+            finally:
+                if document is not None:
+                    document.pdf.close()
+    print(f"{len(plan)} Documents: {written} written, {len(failed)} failed", file=sys.stderr)
+    for line in failed + partly_failed:
+        print(f"  {line}", file=sys.stderr)
+    return 1 if failed or partly_failed else 0
+
+
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    folder_run = args.pdf.is_dir()
+    if folder_run and args.pages is not None:
+        parser.error("--pages cannot be used with a folder: Documents differ in length")
     # Skip model-hoster connectivity checks and quiet noisy third-party output before importing paddle.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     if not args.verbose:
         warnings.filterwarnings("ignore", message=".*ccache.*")
         warnings.filterwarnings("ignore", message=".*copy construct from a tensor.*")
-    return transcribe(args)
+    return transcribe_folder(args) if folder_run else transcribe(args)
 
 
 if __name__ == "__main__":
