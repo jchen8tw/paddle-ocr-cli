@@ -12,6 +12,7 @@ import pytest
 
 import ocr_eval
 from conftest import BASELINE
+from pdf_ocr import DEFAULT_JUDGE_THRESHOLD
 
 pytestmark = pytest.mark.gpu
 
@@ -33,7 +34,7 @@ def test_output_structure(cli_runs, sample_pdf, pages, reader):
     assert doc["engine"]["reader"] == {"minicpm": "MiniCPM-OCR-1.0", "paddle": "PaddleOCR-VL-1.6"}[reader]
     assert doc["engine"]["judge"] == "MiniCPM-OCR-Jev"
     assert "torch" in doc["engine"] and "transformers" in doc["engine"]  # the worker runs the Judge for either Reader
-    assert doc["settings"]["judge"] is True and doc["settings"]["judge_threshold"] == 0.98
+    assert doc["settings"]["judge"] is True and doc["settings"]["judge_threshold"] == DEFAULT_JUDGE_THRESHOLD
     assert {"tables_with_line_breaks_fixed", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []
@@ -91,7 +92,7 @@ def test_with_the_judge_on_every_judged_block_has_a_score_a_verdict_and_a_flag(c
                                     "encode_error", "forward_error"}
             assert (b["score"] is not None) == (b["verdict"] == "scored")
             assert b["score"] is None or 0.0 <= b["score"] <= 1.0
-            assert b["below_threshold"] == (b["score"] is None or b["score"] < 0.98)
+            assert b["below_threshold"] == (b["score"] is None or b["score"] < DEFAULT_JUDGE_THRESHOLD)
             judged += 1
     assert judged > 0
     assert doc["postprocessing"]["judge"]["blocks_judged"] == judged

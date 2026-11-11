@@ -110,3 +110,33 @@ def test_dot_leaders_of_a_table_of_contents_are_ignored():
     )
     assert page.errors == 0
     assert page.ref_chars == 4
+
+
+def test_kind_of_dash_is_not_a_reading_error():
+    # The text layer of the measurement document draws a full-width hyphen where a Reader writes an em dash or a
+    # hyphen; the page shows the same bar either way.
+    for written in "-—–―−‒":
+        page = ocr_eval.score_page([block("table", f"<td>{written}</td>", (0, 0, 100, 20))], chars("－", 5, 10), 1.0)
+        assert page.errors == 0, written
+
+
+def test_a_missing_dash_is_still_an_error():
+    page = ocr_eval.score_page([block("table", "<td></td>", (0, 0, 100, 20))], chars("－", 5, 10), 1.0)
+    assert page.errors == 1
+
+
+def test_display_formulas_are_skipped_not_scored():
+    # A display formula is LaTeX in the Reading and typeset glyphs in the text layer: the two cannot be compared.
+    formula = block("display_formula", r"$$ \frac{a}{b} $$", (0, 40, 100, 60), bid=1)
+    page = ocr_eval.score_page(
+        [block("text", "你好", (0, 0, 100, 20)), formula],
+        chars("你好", 5, 10) + chars("ab", 5, 50),
+        1.0,
+    )
+    assert page.errors == 0 and page.ref_chars == 2 and page.skipped_chars == 2
+    assert "display_formula" not in page.by_label
+
+
+def test_an_inline_formula_in_a_text_block_stays_scored():
+    page = ocr_eval.score_page([block("text", "$x$", (0, 0, 100, 20))], chars("≧", 5, 10), 1.0)
+    assert page.errors == 3 and page.ref_chars == 1

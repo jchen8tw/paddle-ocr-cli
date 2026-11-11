@@ -61,7 +61,8 @@ Why the system's Noto Sans CJK is needed even though the font is bundled, and wh
 own fontconfig, is explained in "The Judge" below.
 
 Memory on a 12 GB GPU, measured with `nvidia-smi` (RTX 4070 Ti, 12,282 MiB, with about 2.4 GB used by the desktop
-and a game during the measurements; a four-page run of a stand-in PDF, see below):
+and a game during the measurements; a four-page run of a "stand-in", a digital-born Traditional Chinese proposal PDF used before the measurement document was available. Whole-run peaks on the 21 measured
+pages are in "Tuning notes": 9,453 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM alone):
 
 | path | main process | worker | peak of the whole card |
 |---|---|---|---|
@@ -105,15 +106,15 @@ and in the Markdown, and the exit code is 1.
 | `--pages` | all | 1-based page selection, e.g. `1-3,7,10-` |
 | `--device` | `gpu:0` if available | Paddle device, e.g. `cpu` |
 | `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added; the JSON only gains a `reader` field in `engine` and `settings` |
-| `--dpi` | 216 | page render resolution |
+| `--dpi` | 216 | page render resolution (144, the official SDK's value, was slightly worse and not faster with MiniCPM; see "Tuning notes") |
 | `--layout-threshold` | 0.2 | layout score threshold; lower finds more blocks but too low invents boxes |
-| `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables. With MiniCPM it is the limit for tables only (see below) |
+| `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables. With MiniCPM it is the limit for tables only (see "The MiniCPM-OCR-1.0 Reader") |
 | `--charts` | off | turn charts into data tables (see Caveats) |
 | `--seals` | off | read the text on seals and stamps |
 | `--ocr-images` | off | also OCR any text inside figures |
 | `--no-merge-blocks` | | do not merge adjacent text blocks before OCR |
 | `--no-judge` | | do not score blocks (no Judge, no `playwright`, `node` or Noto Sans CJK needed). The ink-based re-read of short blocks runs instead |
-| `--judge-threshold FLOAT` | 0.98 | blocks whose Score is below this are re-read (up to 10 Readings, see "Re-reading low-Score Blocks"); the ones still below it afterwards are flagged `below_threshold` in the JSON and counted per page on stderr (see "The Judge" for what to expect at 0.98) |
+| `--judge-threshold FLOAT` | 0.5 | blocks whose Score is below this are re-read (up to 10 Readings, see "Re-reading low-Score Blocks"); the ones still below it afterwards are flagged `below_threshold` in the JSON and counted per page on stderr. The Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain; 0.5 is calibrated on one document (see "Tuning notes"). `0` keeps the Scores and re-reads nothing |
 | `--no-recover` | | with `--no-judge`, turn off the truncated-block re-read. With the Judge on that re-read never runs |
 | `--script {auto,off}` | `auto` | Simplified to Traditional repair; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |
@@ -193,19 +194,212 @@ is one CSV, and `--no-merge-tables` gives one CSV per page part.
 - **JSON entries:** `csv_tables.exported` lists each file with its first page, block id, all the pages
   it covers, and its row and column counts (plus `panels` when side-by-side panels were stacked).
 
-On the sample PDF, all 11 table blocks were valid and became 6 CSVs, because two tables run across
+On the original sample PDF (PaddleOCR-VL; not available any more), all 11 table blocks were valid and became 6 CSVs, because two tables run across
 several pages. One is the drug list on pages 14–16 (93 rows). The other is the ICD-10 code table on
 pages 17–20 (78 rows). In each, PaddleOCR's merge drops the header row repeated at the top of each
-continuation page.
+continuation page. On pages 38-58 of the measurement document all the tables were valid and gave 58 CSVs.
 
-## What was done for accuracy
+## Tuning notes
 
-**The numbers and the steps in this section were measured with PaddleOCR-VL-1.6 (`--reader paddle`).**
-The MiniCPM Reader is described after them.
+Everything in this section was measured on one document with the commands below, on one RTX 4070 Ti (12,282 MiB;
+the desktop uses about 1,000 MiB of it, which is included in every VRAM figure). One run per configuration, except
+where it says otherwise. **These numbers do not come from the original 21-page sample** (sha256 `92edbf79...`),
+which is not available any more, so they cannot be compared with the 0.40 % figure in "Earlier tuning" below.
 
-The goal was the highest precision possible with these two models. Every default below was chosen by
-scoring the output against the text layer of a 21-page Traditional Chinese insurance policy. The PDF's
-own characters were assigned to layout blocks by position, so reading order does not affect the score.
+### The measurement document
+
+| | |
+|---|---|
+| file | `台灣人壽解約金 115.09.23.pdf` (not in the repository; PDFs are gitignored) |
+| sha256 | `1fd73a59c0fb8c1ca33ce8603ca8c0a5b39ff374898730731431d86473236aa7` |
+| pages | 75 in all, **pages 38 to 58 (21 pages)** in every run below |
+| reference | the PDF's own text layer: 16,586 scored characters (16,628 before display formulas were left out) |
+
+It is a Traditional Chinese insurance disclosure (surrender-value tables) with a full text layer, and **the 21
+pages are table-heavy**: by scored characters, tables are 64 % (10,588), text paragraphs 20 % (3,256), footnotes
+11 % (1,771), figure titles 4 %, headers and page numbers 2 %. Pages 38 to 46 are mostly clause text, a list of
+product names and small tables; pages 47 to 58 are 63 to 88 % table. The tables are rate tables, mostly digits.
+That limits what the document can show: **both Readers got all 10,588 table characters right** (the harness
+scores a table's text, not its row and column structure), so nothing here compares table structure, and the
+differences between the Readers come from about 5,000 characters of text and footnotes. Only 12 Blocks out of 320
+contain an error (35 wrong characters in all), so a difference of a few characters is within what one more
+document could change. The 75-page PDF was used because it has a text layer. The 4-page brochure supplied with
+it has none and is only used for a qualitative run (below).
+
+### How the error rate is computed
+
+`ocr_eval.py` (see "Testing") assigns the text layer's characters to the layout Blocks by position and compares
+each Block's Reading with them by edit distance. Two things were fixed in it while measuring, because the raw
+number moved by far more than any Reader's reading:
+
+- **The kind of dash.** The document's text layer draws the dash of every empty table cell as a full-width
+  hyphen (`－`), which prints as one short bar. PaddleOCR-VL writes an em dash (`—`) for it, MiniCPM writes a
+  hyphen or, in some re-reads, an em dash. That is 125 of PaddleOCR-VL's 245 raw errors, and also the 63 to 68
+  extra raw errors of the 0.9 to 0.98 runs below (at 0.9 the Judge scored the em-dash Reading higher in 11 of
+  11 such Blocks, by 0.003 to 0.095). None is a misread, so hyphen, en dash, em dash, minus and full-width hyphen
+  are now folded together.
+- **Display formulas.** A display formula is LaTeX in the Reading and typeset glyphs in the text layer, so 101
+  to 132 "errors" came from one 42-character formula on page 38. Such Blocks are now skipped (and counted as
+  skipped), like figures. Inline formulas in text Blocks stay scored.
+
+The tables below show the strict number (before the fix, what `ocr_eval.py` printed at the time) next to the
+fixed one, so the effect is visible. The fixed one is what `tests/baseline.json` and the end-to-end test use.
+
+### Readers compared
+
+Pages 38-58. "Strict" is the unfixed harness, "CER" the fixed one. Wall time is the whole CLI run, model loading
+included.
+
+| configuration | strict errors (CER) | CER (errors / 16,586) | wall | peak VRAM |
+|---|---|---|---|---|
+| PaddleOCR-VL, `--no-judge` | 245 (1.47 %) | **0.115 %** (19) | 188 s | 9,657 MiB |
+| MiniCPM, `--no-judge` | 195 (1.17 %) | 0.211 % (35) | 234 s | 5,408 MiB |
+| PaddleOCR-VL, Judge on (defaults, threshold 0.5) | 245 (1.47 %) | 0.115 % (19) | 311 s | 10,070 MiB |
+| MiniCPM, Judge on, nothing re-read (`--judge-threshold 0`) | 195 (1.17 %) | 0.211 % (35) | 315 s | 9,453 MiB |
+| **MiniCPM, Judge on (defaults, threshold 0.5)** | 193 (1.16 %) | **0.199 %** (33) | 389 s and 375 s (two runs) | 9,540 and 9,996 MiB |
+
+Per label (fixed harness), wrong characters, PaddleOCR-VL against MiniCPM without the Judge: text 9 against 21
+(of 3,256), footnotes 9 against 13 (of 1,771), tables 0 against 0 (of 10,588), titles, headers and page numbers 0
+against 0. Per page: PaddleOCR-VL has errors on pages 38 (9), 43 (1) and 52 (9); MiniCPM on pages 38 (17), 39, 40,
+43 (1), 48, 51, 52 (9) and 54. Page 38 (the formula and the inline `≧` symbols) carries 17 of MiniCPM's 35 errors;
+page 52 carries 9 of each Reader's, and they are the same 9 (see below); page 43's one error is the text-layer
+character that lies in no Block. Without pages 38 and 52 it is 1 error against 9.
+
+**On this document PaddleOCR-VL reads more characters right than MiniCPM** (19 against 35 wrong). MiniCPM's lead
+in the strict column is only the dash convention. The two Readers' texts differ in 10 Blocks out of 320, and
+PaddleOCR-VL is right or better in all 10:
+
+- **MiniCPM loses on rare Traditional characters.** 躉 became 蔓, 薈 or (after a re-read) 薑 in three footnotes,
+  鑽 became 鑛, 閣 became 閤, 績 became 續, 寶 became 實, 屆 became 居: 9 wrong characters in 8 Blocks, all read
+  correctly by PaddleOCR-VL. The same 躉 weakness shows on the brochure below.
+- **MiniCPM writes symbols as LaTeX.** On page 38 `≧` came out as `$\geq$` or `\geq` in three text Blocks (16
+  errors against PaddleOCR-VL's 9, which also wrapped two of them in `$`). The official SDK has a LaTeX repair
+  for this; it is not ported (issue #7).
+- **MiniCPM wins on Simplified drift.** PaddleOCR-VL wrote 16 Simplified characters (资 别 项) into the
+  Traditional text, in 16 Blocks, all fixed by `--script auto`; without that repair they would be 16 more errors.
+  MiniCPM wrote none in these runs (0 repairs), and 1 at 144 DPI.
+- **MiniCPM needs less memory when it reads alone** (5,408 MiB against 9,657 MiB) but is 24 % slower (234 s
+  against 188 s).
+- **Dropped Blocks: none.** Neither Reader returned an empty Reading for a Block with text, and 1 text-layer
+  character lies in no Block (the layout model is shared). One footnote on page 52 loses its last phrase
+  (`保額：新台幣10萬`) under both Readers although the Block's box covers it; the cause was not found.
+- **Not seen here:** `〔 〕` read as `[ ]`, and the 腫→腗 misread (the document has no ICD tables).
+
+### Judge Scores against errors
+
+The Judge was run on every Block with the re-read switched off (`--judge-threshold 0`), so the Scores belong to
+the first Reading. Of the 320 scored Blocks (the display formula excluded), 12 contain an error.
+
+- The Scores separate wrong from right, **but weakly and on few cases**: the median Score of the 12 wrong Blocks is
+  0.55, of the 308 right ones 0.91, and the chance that a wrong Block scores below a right one is 0.83 (an AUC
+  from 12 wrong Blocks, so wide error bars). The five lowest Scores (0.004 to 0.24) are all rare-character
+  misreads. The Blocks with markup errors (`$`, `\geq`) score 0.77 to 0.88, the dropped phrase 0.92: not
+  separable from correct text.
+- **Many correct Blocks score low.** 38 right Blocks score below 0.5, most of them one-line product names such as
+  `險種：台灣人壽…` (0.2 to 0.5). The Score depends on the label: headers 0.998, page numbers 0.994, figure titles
+  median 0.52, tables 0.89, text 0.84.
+- For PaddleOCR-VL the four wrong Blocks scored 0.77 to 0.92 (none below 0.5); four cases say nothing about
+  separation.
+- **The higher-Scored of the two Readers per Block** (offline, from the two Judge runs) gives 24 wrong characters
+  in Blocks, between PaddleOCR-VL alone (18) and MiniCPM alone (34): it picks the better Reading in 5 of the 10
+  Blocks where the Readers differ. For the rare-character Blocks the Judge scores both Readings low (0.02 to 0.35).
+
+### Threshold calibration (MiniCPM, Judge on)
+
+321 judged Blocks. "Re-read" is the share of Blocks whose first Score was below the threshold; "still below" is the
+share still below it after up to 10 Readings (these are flagged `below_threshold`). The run without re-reading (0)
+is the time reference.
+
+| `--judge-threshold` | Blocks re-read | still below | extra Readings | strict errors | CER (errors) | wall | peak VRAM |
+|---|---|---|---|---|---|---|---|
+| 0 (Scores only) | 0 | 0 | 0 | 195 | 0.211 % (35) | 315 s | 9,453 MiB |
+| **0.5 (new default)** | 44 (13.7 %) | 43 (13.4 %) | 396 | 193 | **0.199 % (33)** | 389 s (+23 %) | 9,540 MiB |
+| 0.7 | 72 (22.4 %) | 71 (22.1 %) | 648 | 195 | 0.199 % (33) | 473 s (+50 %) | 9,985 MiB |
+| 0.9 | 155 (48.3 %) | 155 (48.3 %) | 1,395 | 258 | 0.199 % (33) | 848 s (+169 %) | 10,406 MiB |
+| 0.95 | 240 (74.8 %) | 240 (74.8 %) | 2,160 | 263 | 0.199 % (33) | 965 s (+206 %) | 10,089 MiB |
+| 0.98 (the Judge authors' value, the old default) | 267 (83.2 %) | 267 (83.2 %) | 2,403 | 263 | 0.199 % (33) | 1,090 s (+246 %) | 10,277 MiB |
+
+What re-reading did, in full: of the 44 Blocks read again at 0.5, **two changed**. The 鑽→鑛 misread became right
+(2 errors fewer; Score 0.08 to 0.28, still below 0.5, so still flagged). The 躉→薈 misread became 躉→薑: still wrong,
+but scored **0.87**, so it passed and **lost its flag**. A re-read can replace a flagged wrong Reading with an
+unflagged wrong one. At 0.7 one more Block changed, only in the kind of dash; from 0.9 up at least 11 more
+did, which is the whole difference of the strict column. No threshold changed more than those 2 characters,
+no Block ever reached 0.98 (`exhausted` for every Block still below), and at 0.98 the 2,403 extra Readings
+contained only 38 texts that had not been read before.
+
+The default is **0.5**: the lowest value tried (other than 0) and the cheapest one at which re-reading fixed anything
+(+23 % time, 14 % of Blocks flagged); every higher value made the same fix at a higher cost. That is not a strong calibration: it rests on one fixed Block, and
+with 12 wrong Blocks another pick would be as defensible. The Judge authors' 0.98 is not an option on this evidence:
+it re-reads and flags 83 % of the Blocks and takes 3.5 times as long for nothing more. The flag is a weak review
+queue: at 0.5 it holds 6 of the 12 wrong Blocks among 44 Blocks (14 %); at 0.9, 11 of 12 among 154 (48 %); at 0.95
+and above all 12, among 75 to 83 % of all Blocks. For PaddleOCR-VL (only the 1.25x round can run) the default
+re-read 46 Blocks (14 %) and none changed: 46 extra Readings, all `exhausted`, the same 19 errors.
+
+### Render DPI
+
+| `--dpi` | CER (errors) | Blocks re-read at 0.5 | Simplified repairs | wall | peak VRAM |
+|---|---|---|---|---|---|
+| **216 (default, kept)** | 0.199 % (33) | 44 | 0 | 389 s and 375 s | 9,540 and 9,996 MiB |
+| 144 (what the official SDK renders at) | 0.241 % (40) | 56 | 1 | 470 s | 9,723 MiB |
+
+144 DPI is slightly worse (7 more wrong characters, one Simplified drift, 2 text-layer characters outside every
+Block against 1) and, in this run, not faster: the Judge scored more Blocks below 0.5 (56 against 44), and the
+re-reads cost more than the smaller images save. One run each, and the layout model sees a different image, so the
+Block sets differ (320 against 321 Blocks): a small difference, not a measured cause. The default stays 216.
+
+### Repetition cuts, script repairs, time and memory
+
+- **Repetition cuts: 0** in every MiniCPM run on the 21 pages and on the brochure. The loop cut was therefore not
+  exercised by this document (its tests use synthetic loops). **Script repairs on MiniCPM output: 0** (1 character
+  at 144 DPI); on PaddleOCR-VL output 16 characters.
+- **Time.** The Judge adds 81 s to the 21 pages with MiniCPM (234 s to 315 s, 3.9 s per page) and 122 s with
+  PaddleOCR-VL (188 s to 311 s, including its 46 re-reads). Default MiniCPM takes 375 to 389 s, about 18 s per page.
+- **GPU memory.** The whole card peaked at 9,453 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM without the
+  Judge and 9,657 MiB for PaddleOCR-VL without it. No run hit a Reader or Judge memory error. The higher
+  thresholds peaked a little higher, probably from 4-sample rounds on tables (not checked).
+
+### Determinism
+
+The default configuration was run twice, at different times (`--judge-threshold 0.5` given explicitly, then the plain
+default). The Markdown, all 58 CSVs and the JSON, **Scores and re-reads included, were identical** apart from
+`elapsed_seconds`. That holds for one machine and one GPU (see "The Judge" for the caveat).
+
+### A brochure without a text layer
+
+`台灣人壽金利樂利率變動型養老保險_商品DM_20260529適用.pdf` (4 pages, no text layer, sha256
+`204d75673097d0673386a982d256c5ef533513365a19d4336356a15d9652206c`) was run once with the defaults (MiniCPM, Judge
+on, threshold 0.5, 216 DPI). Nothing exists to compute an error rate against, so this is qualitative. It
+finished with exit code 0 in 214 s (the longest page 91 s, 40 Blocks), peak card memory 10,778 MiB, no crash. 102
+Blocks were judged; 25 were re-read and 22 were left below 0.5 and flagged. Pictures (cover photo, icons, logos)
+were saved as images and not read, no chart data was invented (charts are opt-in), and 5 tables were exported to
+CSV. I read the Markdown of pages 1 to 3 and compared only the page 3 heading with the page image; the two rate
+tables look plausible and I did not check their numbers. What was wrong: the title 躉繳 on page 3 was read as 薹繳 (and 躉 as 臺 in the
+text beside it; the same character MiniCPM misses above, and the Judge flagged that title at 0.42), and a numbered
+clause "三、…" on page 2 became a `##` heading because the layout model labelled it a title (Score 0.96). Text inside
+pictures, such as the title 範例說明 on page 3, is not read by default (`--ocr-images`).
+
+### What these measurements cannot say
+
+One document, one language, 21 of its 75 pages, one GPU. The table characters (64 % of the reference) are right
+for both Readers, so the comparison rests on about 5,000 characters and 12 wrong Blocks. The original sample may
+rank the Readers differently, and a scanned document was not measured at all. Table structure, merged cells and
+reading order are not scored by `ocr_eval.py`. Scores are not promised to be the same on another GPU.
+
+Follow-ups these measurements suggest are filed as issues, not done here: the LaTeX repair (#7), best-of-N or
+disagreement flags across Readers (#8), the re-read clearing a wrong Block's flag (#9), per-label thresholds (#10),
+re-measuring the Reader choice on more documents (#11), scoring table structure and formulas (#12), the dropped
+footnote phrase on page 52 (#13) and the brochure's heading and picture text (#14).
+
+## Design choices
+
+### Earlier tuning on the original sample (PaddleOCR-VL)
+
+**The numbers and steps in this part were measured with PaddleOCR-VL-1.6 (`--reader paddle`) on the original
+21-page sample, which is not available any more, with an earlier throwaway harness. They are not comparable with the
+measurements above.** Steps marked "both" live in the pipeline and apply to both Readers.
+
+The goal was the highest precision possible with these models. The PDF's own characters were assigned to layout
+blocks by position, so reading order does not affect the score.
 
 | | Character error rate | Simplified chars in a Traditional doc |
 |---|---|---|
@@ -214,33 +408,35 @@ own characters were assigned to layout blocks by position, so reading order does
 
 Each change and the reason for it:
 
-1. **Layout threshold 0.3 → 0.2.** At the default, the layout model silently dropped whole paragraphs.
+1. **Layout threshold 0.3 → 0.2** (both). At the default, the layout model silently dropped whole paragraphs.
    Lowering the threshold cut the characters lost to missing blocks from about 85 to about 25. At 0.1
    it starts inventing full-width boxes.
-2. **Render at 216 DPI.** 288 DPI scored the same and is slower.
-3. **Simplified → Traditional repair (`--script auto`).** The model drifts into Simplified forms when
-   reading Traditional text (银行, 医院), and a higher resolution does not fix it. The repair runs only
-   when the document is clearly Traditional: at least 30 Traditional-only characters, and no more than
-   15 % of the script-specific characters Simplified. Even then it changes only characters that cannot
-   be encoded in Big5 and that OpenCC maps to another form. A blanket OpenCC conversion would also
-   rewrite valid Traditional characters such as 台→臺 and 后→後. Formula blocks are never touched.
-4. **Truncated-block re-read.** Now and then the model returns a few characters for a whole paragraph,
-   and it does so every time for the same input. The tool estimates from the ink how many glyphs a text
-   block holds. If the recognised text has fewer than 35 % of that, the block is re-read from renders
-   at 1.25× and 0.8×. The longer reading is kept only if it is clearly longer and still plausible. On
-   the sample, this recovered a 77-character paragraph exactly.
-5. **Table line breaks.** The model writes an in-cell line break as a literal `\n`. It is rewritten to
-   `<br>`.
-6. **Charts and seals are opt-in.** In a synthetic test, chart recognition invented data for a figure it
-   took to be a chart. By default, charts and seals are saved as images instead.
-7. **Cross-page restructuring only for the Markdown and CSV.** PaddleOCR's table merge moves a
-   continued table's content into the first page's block and empties the later ones. Building the JSON
-   from that would make whole pages look blank, so the JSON is built before the merge.
-8. **Image names are prefixed with the page number.** PaddleOCR names crops by their bbox only, so crops
-   from different pages could overwrite each other.
+2. **Render at 216 DPI** (both). 288 DPI scored the same and is slower; 144 is a little worse with MiniCPM (see
+   "Render DPI").
+3. **Simplified → Traditional repair (`--script auto`)** (both). PaddleOCR-VL drifts into Simplified forms when
+   reading Traditional text (银行, 医院), and a higher resolution does not fix it (MiniCPM drifted far less, see
+   above). The repair runs only when the document is clearly Traditional: at least 30 Traditional-only
+   characters, and no more than 15 % of the script-specific characters Simplified. Even then it changes only
+   characters that cannot be encoded in Big5 and that OpenCC maps to another form. A blanket OpenCC conversion
+   would also rewrite valid Traditional characters such as 台→臺 and 后→後. Formula blocks are never touched.
+4. **Truncated-block re-read** (both; with the Judge on it is replaced by the Judge's re-reading). Now and then
+   PaddleOCR-VL returns a few characters for a whole paragraph, and it does so every time for the same input. The
+   tool estimates from the ink how many glyphs a text block holds. If the recognised text has fewer than 35 % of
+   that, the block is re-read from renders at 1.25× and 0.8×. The longer reading is kept only if it is clearly
+   longer and still plausible. On the sample, this recovered a 77-character paragraph exactly.
+5. **Table line breaks.** PaddleOCR-VL writes an in-cell line break as a literal `\n`. It is rewritten to
+   `<br>` (MiniCPM: see below).
+6. **Charts and seals are opt-in** (both). In a synthetic test, PaddleOCR-VL's chart recognition invented data for a
+   figure it took to be a chart. By default, charts and seals are saved as images instead.
+7. **Cross-page restructuring only for the Markdown and CSV** (both). PaddleOCR's table merge moves a continued
+   table's content into the first page's block and empties the later ones. Building the JSON from that would make
+   whole pages look blank, so the JSON is built before the merge.
+8. **Image names are prefixed with the page number.** PaddleOCR names crops by their bbox only, so crops from
+   different pages could overwrite each other.
 9. **`footnote` blocks stay in the Markdown.** PaddleOCR's default drops them, but they are real content.
 
-The output is deterministic: running the same PDF twice gives identical Markdown and JSON content.
+With PaddleOCR-VL the output is deterministic: running the same PDF twice gives identical Markdown and JSON content
+(the same was confirmed for MiniCPM with the Judge, above).
 
 ### The MiniCPM-OCR-1.0 Reader
 
@@ -273,25 +469,16 @@ The raw Reading is then cleaned in this order:
 
 The truncated-block re-read (`--no-recover`) also works with MiniCPM, but only without the Judge (`--no-judge`).
 
-What differs from PaddleOCR-VL in the text: MiniCPM keeps the printed spacing around Latin letters and
-digits (`表 1-1`, `OCR 及`), writes `[...]` for the printed `〔...〕`, and uses `(...)` for full-width
-brackets inside table cells. These cost error-rate points when the text layer is the reference, though they
-are cosmetic. It also misreads the odd character the repair cannot fix: `爰` came out as the Simplified `爱`,
-which the repair turned into `愛`.
+What differs from PaddleOCR-VL in the text. Seen on a digital-born proposal PDF used before the measurement
+document (not seen on it, where full-width forms are normalised away and nothing of the kind showed up in the
+errors): MiniCPM keeps the printed spacing around Latin letters and digits (`表 1-1`, `OCR 及`), writes `[...]` for
+the printed `〔...〕`, and uses `(...)` for full-width brackets inside table cells. Seen on the measurement
+document: it writes inline symbols such as `≧` as LaTeX (`$\geq$`), misreads some rare Traditional characters
+(躉, 鑽, 閣, 績, 寶, 屆) that PaddleOCR-VL reads correctly, and does not drift into Simplified characters the
+way PaddleOCR-VL does. It can also misread the odd character the repair cannot fix: on the proposal, `爰` came out as
+the Simplified `爱`, which the repair turned into `愛`. Numbers are in "Tuning notes".
 
-**Measurement (a stand-in, not the sample).** The 21-page insurance policy that the numbers above come from
-was not available when MiniCPM was added. For a first check, pages 3 to 12 of a different Traditional
-Chinese proposal PDF (digital-born, 5,961 text-layer characters, 10 pages) were run with `ocr_eval.py`:
-
-| Reader | errors | character error rate |
-|---|---|---|
-| PaddleOCR-VL-1.6 | 0 | 0.00 % |
-| MiniCPM-OCR-1.0 | 10 | 0.17 % |
-
-This is only a smoke test of the harness and the Reader on a stand-in document. It is not a baseline and it
-does not say which Reader is better on the sample. The measurement on the sample is a later ticket.
-Roughly the same time per page for both Readers (about 65 s for these 10 pages, including the
-model load).
+The measurements of this Reader against PaddleOCR-VL are in "Tuning notes" above.
 
 ### The Judge
 
@@ -320,8 +507,8 @@ again, up to nine more times, and the best Reading is kept (next section).
   reason. A failure on one Block never stops the run: the Reading is kept and the failure recorded. A page whose
   Judge call fails entirely gets `forward_error` on all its judged Blocks.
 - **On stderr**, each page's line says how many of its judged Blocks are below the threshold (after re-reading)
-  and how many were re-read, e.g. `[  4/5] page 7: 11 blocks, 30.9s, 9 of 11 judged below the threshold, 9 re-read` (stand-in PDF, default threshold),
-  with the number not scored in brackets when there are some. The Markdown contains no Scores or markers.
+  and how many were re-read, e.g. `[  2/21] page 39: 23 blocks, 20.6s, 4 of 23 judged below the threshold, 4 re-read` (measurement document,
+  threshold 0.5), with the number not scored in brackets when there are some. The Markdown contains no Scores or markers.
 - **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
   of a merged table.
 - **Same text as written, give or take one space.** Before a Reading is judged it gets the same clean-up it gets for the output:
@@ -336,8 +523,8 @@ again, up to nine more times, and the best Reading is kept (next section).
 - **One Chromium launch per batch.** The pipeline hands the Reader a page's Blocks in one call (one call per
   pixel-budget group, which on the stand-in was always one per page: four pages, four score requests), and the
   Readings of that call are rendered in one batch (a launch costs about 0.8 s) and scored one at a time (batching
-  changes the Scores slightly). On the stand-in PDF the Judge added about 2.6 s per
-  page (the four pages took 24 s of page time without it and 34 s with it).
+  changes the Scores slightly). On the measurement document the Judge adds 3.9 s per page with MiniCPM (see
+  "Tuning notes").
 
 **The repair is decided while reading, so the Judge sees repaired text.** The Simplified to Traditional repair is
 document-level: it needs the whole document to decide the document is Traditional (at least 30 Traditional-only
@@ -402,26 +589,24 @@ schedule is fixed; each step runs only while the best Score so far is below the 
   a formula with its margins cut, a table with figure placeholders painted in, or a Block cut with a polygon mask is
   not, and its own crop is enlarged by 1.25 (Lanczos) instead. Each Reading says which one it came from
   (`scale_source`: `page_render` or `crop_resample`), and `postprocessing.judge.scaled_images_by_source` counts them.
-  On the stand-in the page render was used for 60 of 61 Blocks (MiniCPM) and 23 of 24 (paddle). It did not help much:
-  see the measurements below.
+  On the measurement document the page render was used for all 44 re-read Blocks at threshold 0.5 (MiniCPM); on a stand-in
+  proposal PDF for 60 of 61 (MiniCPM) and 23 of 24 (paddle). It did not help much: see "Tuning notes".
 - **Batched per page.** Round by round, only the Blocks still below the threshold are read, and each round is one
   batch of Reader requests and **one** Judge call (one Chromium launch) for the call's new Readings, not one per
   Block. The pipeline hands the Reader one call per pixel-budget group of a page, so this is per call.
   A sampled round costs one worker request per Block (4 samples decoded together, with only the last position's
   logits computed at prefill, which keeps a 4-sample table read inside the card's memory next to the Judge).
-- **Cost, measured on the stand-in PDF** (a digital-born Traditional Chinese proposal, *not* the sample; pages 4-8,
-  61 judged Blocks, MiniCPM Reader, RTX 4070 Ti). **At the default threshold of 0.98, 59 of the 61 Blocks were
-  re-read and none of them reached 0.98 (`exhausted`); the 5 pages took 179 s, against 58 s when nothing is
-  re-read (`--judge-threshold 0`), about three times as long.** Defaults are unchanged until the threshold is
-  calibrated. At 0.9999 all 61 were re-read in 188 s. Re-reading helped little there: the 549 extra Readings
-  contained only 13 distinct new texts (4 from the 1.25x page render, 6 from the 0.3 samples, 3 from the 0.7
-  samples) spread over 9 Blocks; the winning Reading differs from the first for 5 Blocks, the Score went up for 5
-  (mean gain over all re-read Blocks 0.005, largest 0.21), and no Block reached the threshold. With the paddle Reader
-  on pages 4-5 (24 Blocks, 46 s) the 1.25x page render gave the same text for all 24. The schedule, as specified,
-  spends most of its time on duplicates; the threshold calibration (a later ticket) decides how often it runs at all.
+- **Cost, measured on the measurement document** (pages 38-58, 321 judged Blocks, MiniCPM Reader, RTX 4070 Ti; the
+  table is in "Tuning notes"). At the old default of 0.98, 267 of the 321 Blocks (83 %) were re-read and none reached
+  0.98; the run took 1,090 s against 315 s when nothing is re-read (`--judge-threshold 0`), 3.5 times as long, and
+  the error rate was the same as at 0.5. The 2,403 extra Readings contained 38 texts not read before. **At the
+  default of 0.5, 44 Blocks (14 %) were re-read, the run took 389 s (+23 %), and two Blocks changed**, one for the
+  better and one to another wrong Reading with a high Score that cleared its flag. With the paddle Reader the
+  1.25x round gave the same text for all 46 re-read Blocks. The schedule, as specified, spends most of its time on
+  duplicates.
 - **GPU memory.** With the Layout model, MiniCPM and Jev loaded, `nvidia-smi` (whole card, 1 s samples, about 1 GB of
-  it other desktop processes) peaked at 10.6 GB of 12.3 GB over the MiniCPM runs above, and at 9.6 GB for the paddle
-  run. The tables in those runs were small (319 to 380 characters of HTML). On the largest table crop available (1369 x
+  it other desktop processes) peaked at 9,453 to 10,406 MiB of 12,282 MiB over the threshold runs on the measurement
+  document (10,778 MiB on the brochure), and at 10,070 MiB for the paddle run. The tables in those runs were small (319 to 380 characters of HTML). On the largest table crop available (1369 x
   1091 px, 2561 prompt tokens, 239 generated tokens) the worker alone went from 8.2 GB (both models idle) to 9.8 GB
   while decoding 4 seeded samples at 0.7, and the second call with the same seed gave identical texts. **The worst
   case, 4 samples of a table that runs to the 8192-token limit, was not run.** The 4-sample rounds rely on the worker
@@ -433,13 +618,11 @@ schedule is fixed; each step runs only while the best Score so far is below the 
 your own data. On one machine and one GPU the same PDF gives identical Scores (the end-to-end test runs it twice
 and compares the JSON).
 
-**The default threshold of 0.98 flags most Blocks.** 0.98 is the authors' uncalibrated default (`tau`). On a
-four-page run of a stand-in document (a digital-born Traditional Chinese proposal, *not* the sample), 40 judged
-Blocks scored a median of 0.941 (range 0.485 to 0.994); 2 reached 0.98, 28 reached 0.90. The Readings were
-plausible by eye, so most correct Readings are flagged until the threshold is calibrated on the sample (a
-later ticket). `--judge-threshold` changes the flag; the Score itself does not depend on it. The two lowest
-were a table (0.48; not checked against the page) and a paragraph where the Reader had misread `爰` as `爱` (0.72), a
-known misread.
+**The Judge authors' threshold of 0.98 flags most Blocks; the default is 0.5.** 0.98 is the authors' uncalibrated value
+(`tau`). On the measurement document 83 % of the Blocks score below it, the correct ones included, because a
+correct Reading usually scores well under 0.98 (median 0.91). 0.5 flags 14 % of the Blocks and holds half of the
+wrong ones; 0.9 flags 48 % and holds 11 of 12 (see "Judge Scores against errors" and the threshold table in
+"Tuning notes"). `--judge-threshold` changes the flag and the re-reading; the Score itself does not depend on it.
 
 **Why the renderer needs the system's Noto Sans CJK, and how it is made reproducible.** The renderer is the
 authors' own, vendored unchanged in `worker/render/` ([ADR-0002](docs/adr/0002-judge-uses-the-official-renderer.md)
@@ -477,29 +660,41 @@ timeout, so a stuck worker cannot hang the run.
 
 ## Caveats
 
-- The tuning was measured on one Traditional Chinese document, with PaddleOCR-VL. Other languages and
-  layouts should work, but these numbers do not carry over to them. MiniCPM-OCR-1.0 became the default
-  before it was measured on that document; see the stand-in measurement above.
-- The Judge adds three setup items (Chromium, `node`, Noto Sans CJK) and about 2.6 s per page; `--no-judge` avoids
-  them. With the default threshold of 0.98 most Blocks are flagged and, since a flagged Block is re-read, **most
-  Blocks are also re-read: on the stand-in the five pages took about three times as long as without re-reading**
-  (179 s against 58 s; see "Re-reading low-Score Blocks"). `--judge-threshold 0` turns the re-reading off while
-  keeping the Scores. A Score is only as comparable as the machine it was made on.
+- **The numbers are from one document.** The defaults were measured on pages 38 to 58 of one Traditional Chinese
+  insurance disclosure (table-heavy, 12 Blocks with errors; "Tuning notes"), not on the original sample, and the
+  threshold default in particular rests on a single corrected Block. Other languages and layouts should work, but
+  these numbers do not carry over, and a scanned document was not measured at all. Re-check `--judge-threshold`
+  on your own documents (`ocr_eval.py` needs a text layer; the JSON's `score` and `below_threshold` do not).
+- **On the measurement document MiniCPM, the default Reader, read fewer characters right than PaddleOCR-VL**
+  (35 against 19 wrong of 16,586), mostly rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) and inline
+  symbols written as LaTeX (`≧` as `$\geq$`). It needs about half the GPU memory when it reads alone and does not drift into Simplified
+  characters. `--reader paddle` is a reasonable choice for a Traditional document where those characters matter.
+- **The Judge is a weak error detector.** At the default 0.5 it flags 14 % of the Blocks and about half of the
+  Blocks with an error; a correct Reading often scores low (one-line product names, figure titles), and a re-read can
+  replace a flagged wrong Reading by a wrong one with a high Score (躉 became 薑 at 0.87) that is no longer flagged.
+  Treat `below_threshold` as a hint, not a verdict. Scores are only as comparable as the machine that made them.
+- The Judge adds three setup items (Chromium, `node`, Noto Sans CJK) and, with MiniCPM, 3.9 s per page; with the
+  default threshold the re-reads add about 23 % more run time (375 to 389 s against 315 s for the 21 pages). At the
+  authors' 0.98 most Blocks are re-read and the run takes 3.5 times as long. `--no-judge` avoids all of it
+  (234 s); `--judge-threshold 0` keeps the Scores and turns the re-reading off.
 - `--reader minicpm` and the Judge need the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
   torch wheel targets CUDA 13.2; a driver that supports only CUDA 13.0 needs a different torch index in
   `worker/pyproject.toml`. This was not tested.
-- About 94 of the 23,390 characters in the sample are still wrong, and these are model errors:
-  - a repeated 腫→腗 misread in the ICD tables
-  - a few small blocks the layout model never detects
-  - 干 / 于 left where 幹 / 於 was meant. They are valid Traditional characters, so the repair
-    deliberately leaves them.
+- A page of a table-heavy PDF takes about 18 s with the defaults (MiniCPM, Judge on) on an RTX 4070 Ti (12 GB), and
+  the card peaked at 9,540 to 10,000 MiB (about 1,000 MiB of it the desktop) on the measurement document, 10,778 MiB
+  on a four-page brochure. The worst case, a table of 8,192 tokens read as 4 samples next to the Judge, was not run.
+- **Paddle-only (original sample, `--reader paddle`):** about 94 of the 23,390 characters in the original sample were
+  still wrong with PaddleOCR-VL, all model errors: a repeated 腫→腗 misread in the ICD tables, a few small blocks the
+  layout model never detects, and 干 / 于 left where 幹 / 於 was meant (valid Traditional characters, so the repair
+  deliberately leaves them). Whether MiniCPM repeats the 腫→腗 misread was not measured (the measurement document has
+  no ICD tables). PaddleOCR-VL also drifts into Simplified characters (16 in the 21 measured pages, all repaired by
+  `--script auto`), and its local model ignores sampling, so only one re-read round can run with it.
 - The orientation and unwarping models are not in `models/`. Rotated or warped scans are therefore not
   corrected.
-- If a PDF already has a real text layer, as the sample does, extracting that text directly is exact.
+- If a PDF already has a real text layer, as the measurement document does, extracting that text directly is exact.
   OCR is what matters for scanned PDFs.
-- Speed: about 3.5 minutes for the 21-page sample on an RTX 4070 Ti (12 GB) with PaddleOCR-VL alone and no Judge,
-  plus a few seconds to load the models. The Judge and the re-reads add to that (see above); the sample has not been
-  re-timed with them.
+- Text inside pictures is not read unless you pass `--ocr-images`; on the brochure that left out a heading that is part of
+  an image.
 - Some harmless messages still appear on stderr, such as `which: no ccache` and a "Bucketed
   engine_config" warning.
 
@@ -508,8 +703,13 @@ timeout, so a stuck worker cannot hang the run.
 ```bash
 uv sync                      # includes the pytest dev group
 uv run pytest                # fast tests; the tests that need a PDF skip without one
-PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf uv run pytest          # also run the CLI on pages 1-3 (GPU + models)
+# also run the CLI on pages 38-58 of the measurement document, with both Readers (GPU + models, about an hour):
+PDF_OCR_SAMPLE_PDF="/path/to/台灣人壽解約金 115.09.23.pdf" uv run pytest
 ```
+
+The end-to-end tests run on the pages in `tests/baseline.json` (38-58) of the document the baseline was measured on. Set
+`PDF_OCR_PAGES=42-45` for a shorter run; the error-rate check is then skipped, because the recorded bound belongs
+to those pages, unless you also set `PDF_OCR_CER_BOUND`. The check is likewise skipped for any other PDF.
 
 The fast tests need neither a GPU nor models: "read a Block" with a fake Reader and a fake Judge (repair happens
 before judging, unjudged labels are skipped, failure verdicts, `--no-judge` and the ink re-read; and the re-read
@@ -547,7 +747,7 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   LaTeX and a missing crop get `precheck_reject` and `missing_original_image` while the rest of the batch is scored.
   It needs the worker environment, Chromium, `node` and Noto Sans CJK.
 
-`PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, now `1-3`), `PDF_OCR_MODELS_DIR`,
+`PDF_OCR_PAGES` (default: the `pages` in `tests/baseline.json`, `38-58`), `PDF_OCR_MODELS_DIR`,
 `PDF_OCR_CER_BOUND`, `PDF_OCR_READERS` (default `minicpm,paddle`) and `PDF_OCR_WORKER_ENV` (the worker's
 virtual environment; default `worker/.venv`) override the pages, the models folder, the bound, the Readers
 to run and the worker environment. `PDF_OCR_WORKER_ENV` also works for the CLI itself.
@@ -560,10 +760,23 @@ page and per Block label:
 uv run ocr_eval.py input.pdf [output/<stem>/<stem>.json] [--report scores.json]
 ```
 
-Text-layer characters that lie in no Block count as errors; figures, charts and seals are not scored;
-whitespace, HTML markup, full/half-width forms and table-of-contents dot leaders are ignored.
+Text-layer characters that lie in no Block count as errors; figures, charts and seals are not scored, and neither are
+display formulas (LaTeX against typeset glyphs; they are reported as skipped); whitespace, HTML markup, full/half-width
+forms, the kind of dash and table-of-contents dot leaders are ignored. The score looks at a table's text, not at its
+structure.
 
-The bound in `tests/baseline.json` is currently a **placeholder** (5 %), not a measurement. The baseline
-of PaddleOCR-VL-1.6 on the 21-page sample still has to be measured with `ocr_eval.py` and recorded there,
-on exactly the pages in `baseline.json` (the 0.40 % above came from an earlier throwaway harness with
-different normalisation and the whole document, so it is not this tool's baseline).
+`tests/baseline.json` holds the recorded baseline: the document (name, sha256, pages), the error rate measured for each
+Reader with its default options, and the bound the end-to-end test enforces (`minicpm` 0.25 %, `paddle` 0.20 %:
+the measured rate plus 0.05 percentage points, rounded up to the next 0.05). The measured rates are 0.199 % (33 of
+16,586 characters) for MiniCPM and 0.115 % (19) for PaddleOCR-VL. **This is not the original 21-page sample**, which
+is not available; the numbers are not comparable with the 0.40 % in "Earlier tuning". To reproduce them:
+
+```bash
+PDF="/path/to/台灣人壽解約金 115.09.23.pdf"        # sha256 1fd73a59c0fb8c1ca33ce8603ca8c0a5b39ff374898730731431d86473236aa7
+uv run pdf_ocr.py "$PDF" -o out --pages 38-58                  # MiniCPM, Judge on, threshold 0.5, 216 DPI
+uv run ocr_eval.py "$PDF" "out/台灣人壽解約金 115.09.23.json"
+uv run pdf_ocr.py "$PDF" -o out_paddle --pages 38-58 --reader paddle
+uv run ocr_eval.py "$PDF" "out_paddle/台灣人壽解約金 115.09.23.json"
+```
+
+The end-to-end test fails if a Reader's error rate on those pages rises above its bound; it does not fail if it improves.

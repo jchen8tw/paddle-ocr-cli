@@ -1,29 +1,23 @@
 {
-  "_comment": "Bound for the end-to-end character-error-rate check (tests/test_e2e.py). While bound_is_placeholder is true, cer_bound is NOT a measurement: it is a loose sanity ceiling. To record the real baseline, run the CLI on the sample PDF, run `python ocr_eval.py <pdf>`, then set cer_bound slightly above the measured total CER, set bound_is_placeholder to false and fill in `measured`.",
-  "bound_is_placeholder": true,
-  "pages": "1-3",
-  "cer_bound": 0.05,
-  "measured": null,
-  "harness_smoke_test_on_substitute_pdf": {
-    "_comment": "NOT the baseline: the 21-page sample is not on this machine. This only shows the harness runs end to end on a real PDF.",
-    "pdf": "a digital-born Traditional Chinese proposal PDF (not the sample)",
-    "pages": "3-12",
-    "reader": "PaddleOCR-VL-1.6 with pdf_ocr.py defaults",
-    "errors": 0,
-    "ref_chars": 5961
+  "_comment": "Bound for the end-to-end character-error-rate check (tests/test_e2e.py), measured with ocr_eval.py (dash kinds folded, display formulas skipped; see the README 'Tuning notes'). It applies only to the document and pages below, run with the default options of each Reader (Judge on, default threshold, 216 DPI): with another PDF or other pages the check is skipped unless PDF_OCR_CER_BOUND is set. Rule for the bound: measured error rate + 0.05 percentage points, rounded up to the next 0.05 percentage points. This is NOT the original 21-page sample (sha256 92edbf79...), which is not available; numbers here are not comparable with the earlier 0.40 % figure.",
+  "bound_is_placeholder": false,
+  "document": {
+    "name": "台灣人壽解約金 115.09.23.pdf",
+    "sha256": "1fd73a59c0fb8c1ca33ce8603ca8c0a5b39ff374898730731431d86473236aa7",
+    "total_pages": 75,
+    "is_original_sample": false,
+    "note": "Traditional Chinese insurance disclosure with a full text layer, mostly numeric tables. Not committed (gitignored); the person running the tests supplies it with PDF_OCR_SAMPLE_PDF."
   },
-  "stand_in_measurements": {
-    "_comment": "NOT the baseline and NOT the sample: a smoke measurement of both Readers on a different, digital-born Traditional Chinese proposal PDF, pages 3-12, with `python ocr_eval.py` (pdf_ocr.py defaults). The sample's baseline per Reader is still to be measured.",
-    "pdf": "a digital-born Traditional Chinese proposal PDF (not the sample)",
-    "pages": "3-12",
-    "ref_chars": 5961,
-    "readers": {
-      "paddle": {
-        "errors": 0
-      },
-      "minicpm": {
-        "errors": 10
-      }
-    }
-  }
+  "pages": "38-58",
+  "ref_chars": 16586,
+  "cer_bound": {
+    "minicpm": 0.0025,
+    "paddle": 0.0020
+  },
+  "measured": {
+    "_comment": "Default options of each Reader, RTX 4070 Ti 12 GB, 2026-11-11. errors/ref_chars are ocr_eval.py's total (incl. 1 text-layer character in no Block). wall_seconds is the whole CLI run including model load; peak_vram_mib is the whole card, which has about 1 GB of desktop use.",
+    "minicpm": {"errors": 33, "ref_chars": 16586, "cer": 0.001990, "wall_seconds": 389, "peak_vram_mib": 9540, "command": "--reader minicpm (Judge on, --judge-threshold 0.5, --dpi 216)"},
+    "paddle": {"errors": 19, "ref_chars": 16586, "cer": 0.001146, "wall_seconds": 311, "peak_vram_mib": 10070, "command": "--reader paddle (Judge on, --judge-threshold 0.5, --dpi 216)"}
+  },
+  "reproduce": "PDF_OCR_SAMPLE_PDF=\"/path/to/台灣人壽解約金 115.09.23.pdf\" uv run pytest -m gpu tests/test_e2e.py   # or: uv run pdf_ocr.py \"<pdf>\" -o out --pages 38-58 --reader minicpm && uv run ocr_eval.py \"<pdf>\" out/<stem>.json"
 }

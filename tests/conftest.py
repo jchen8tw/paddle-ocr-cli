@@ -2,10 +2,10 @@
 
 The sample PDF is gitignored, so it comes from outside:
 
-    PDF_OCR_SAMPLE_PDF=/path/to/policy.pdf pytest -m gpu        # 21-page Traditional Chinese policy
-    PDF_OCR_PAGES=1-3                                           # pages to run (default: "pages" in tests/baseline.json)
+    PDF_OCR_SAMPLE_PDF="/path/to/台灣人壽解約金 115.09.23.pdf" pytest -m gpu   # the document tests/baseline.json was measured on
+    PDF_OCR_PAGES=42-45                                         # pages to run (default: "pages" in tests/baseline.json)
     PDF_OCR_MODELS_DIR=/path/to/models                          # default: ./models
-    PDF_OCR_CER_BOUND=0.01                                      # overrides tests/baseline.json
+    PDF_OCR_CER_BOUND=0.01                                      # overrides the per-Reader bound in tests/baseline.json
     PDF_OCR_READERS=minicpm                                     # readers to run (default: minicpm,paddle)
     PDF_OCR_REREAD_PAGES=4-5                                    # pages of the forced re-read runs (default: 4-5)
     PDF_OCR_WORKER_ENV=/path/to/worker-venv                     # worker environment (default: worker/.venv)
@@ -15,6 +15,7 @@ The Judge is on by default, so the worker environment, `playwright install chrom
 needed for every run that does not pass --no-judge (see the README). Set PLAYWRIGHT_BROWSERS_PATH if Chromium is
 not in the default place.
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -84,10 +85,20 @@ def pages() -> str:
 
 
 @pytest.fixture(scope="session")
-def cer_bound() -> float:
+def cer_bound(reader, sample_pdf, pages) -> float:
+    """The recorded bound for this Reader. It was measured on one document and one page range, so it is only
+    applied to those; with another document or other pages set PDF_OCR_CER_BOUND (the check is skipped otherwise)."""
     if "PDF_OCR_CER_BOUND" in os.environ:
         return float(os.environ["PDF_OCR_CER_BOUND"])
-    return float(BASELINE["cer_bound"])
+    digest = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+    if digest != BASELINE["document"]["sha256"]:
+        pytest.skip(f"tests/baseline.json was measured on {BASELINE['document']['name']} "
+                    f"(sha256 {BASELINE['document']['sha256'][:12]}...), not on {sample_pdf.name}; "
+                    "set PDF_OCR_CER_BOUND to check the error rate against your own bound")
+    if pages != BASELINE["pages"]:
+        pytest.skip(f"tests/baseline.json was measured on pages {BASELINE['pages']}, not {pages}; "
+                    "set PDF_OCR_CER_BOUND to check the error rate against your own bound")
+    return float(BASELINE["cer_bound"][reader])
 
 
 def run_cli(pdf: Path, out_dir: Path, models_dir: Path, pages: str, reader: str = "minicpm",
