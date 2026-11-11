@@ -41,6 +41,22 @@ def test_a_document_after_another_in_the_same_engine_comes_out_as_if_it_were_alo
     assert in_the_same_engine == transcribe(alone_engine, second, tmp_path / "b2")
 
 
+def test_the_lone_symbols_one_document_unwrapped_are_not_counted_for_the_next(tmp_path):
+    first, second = blank_pdf(tmp_path / "first.pdf"), blank_pdf(tmp_path / "second.pdf", height=301)
+    engine, client = engine_with(tmp_path)
+    client.texts = {"Text Recognition:": r"年滿15足歲\geq者"}
+    a, _ = transcribe(engine, first, tmp_path / "a")
+    assert a["postprocessing"]["latex_symbols_unwrapped"] > 0
+
+    client.texts = {"Text Recognition:": "no symbol here"}
+    in_the_same_engine = transcribe(engine, second, tmp_path / "b1")
+    assert in_the_same_engine[0]["postprocessing"]["latex_symbols_unwrapped"] == 0
+
+    alone_engine, alone_client = engine_with(tmp_path / "alone")
+    alone_client.texts = {"Text Recognition:": "no symbol here"}
+    assert in_the_same_engine == transcribe(alone_engine, second, tmp_path / "b2")
+
+
 class PreviousDocumentsPage:
     """A page of the previous Document: anything that touches it is a leak."""
 
