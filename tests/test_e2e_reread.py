@@ -41,11 +41,11 @@ def test_a_re_read_block_has_readings_a_stop_reason_and_the_winners_content_and_
         if scored:
             assert b["score"] == max(scored)  # the highest Score wins, not the latest
             assert b["stop_reason"] != "no_scored"
-        assert b["flagged"] is True  # a re-read never clears the flag
+        assert b["flagged"] is True
         if b["stop_reason"] == "no_new_text":
-            assert any(r.get("duplicates") for r in readings)  # the last round only repeated earlier texts
+            assert any(r.get("duplicates") for r in readings)
         if reader == "paddle":  # the local PaddleOCR-VL cannot sample: rounds 3 and 4 are recorded as skipped
-            reached_round_3 = b["stop_reason"] in ("exhausted", "no_scored")  # round 2 read a new text
+            reached_round_3 = b["stop_reason"] in ("exhausted", "no_scored")
             assert [s["round"] for s in b.get("skipped_rounds", [])] == ([3, 4] if reached_round_3 else [])
             assert {r["round"] for r in readings} <= {1, 2}
 

@@ -1,7 +1,6 @@
 """Re-reading low-Score Blocks (ticket #5), at the "read a Block" seam: a fake Reader and a fake Judge.
 
-The schedule (each step runs only while the best Score so far is below the threshold and no step so far read only
-texts already read):
+The schedule:
     round 1  greedy, 1x          (the first Reading)
     round 2  greedy, 1.25x
     round 3  4 samples, temperature 0.3
@@ -179,10 +178,8 @@ def test_the_winner_that_is_not_the_first_reading_replaces_the_blocks_text_score
     assert (out.text, out.score, out.verdict) == ("x2", 0.6, "scored")
 
 
-# ------------------------------------------------------------------ the flag comes from the first Reading
-
 def test_a_re_read_that_reaches_the_threshold_does_not_clear_the_flag_of_a_low_first_reading():
-    reader = ScriptedReader({("a", 1): "薈繳", ("a", 2): "薑繳"})  # the truth is 躉繳: the winner is still a misread
+    reader = ScriptedReader({("a", 1): "薈繳", ("a", 2): "薑繳"})
     judge = ScriptedJudge({"薈繳": 0.05, "薑繳": 0.87})
     out = read_block(req("a"), reader, judge, settings(threshold=0.5))
     assert (out.text, out.score, out.flagged, out.stop_reason) == ("薑繳", 0.87, True, "passed")
@@ -205,7 +202,7 @@ def test_duplicate_texts_are_scored_once_and_listed_once():
     out = read_block(req("a"), reader, judge, settings())
     assert sorted(judge.shown) == sorted([first(), "s", "t", "u"])
     assert [r.text for r in out.readings] == [first(), "s", "t", "u"]
-    assert [r.duplicates for r in out.readings] == [1, 4, 1, 0]  # the Readings are counted, not hidden
+    assert [r.duplicates for r in out.readings] == [1, 4, 1, 0]
     assert out.stop_reason == "exhausted"
 
 
@@ -221,10 +218,8 @@ def test_duplicates_count_against_the_ten_reading_cap():
     reader = ScriptedReader({("a", 2): "s", ("a", 3): [first()] * 3 + ["t"], ("a", 4): [first()] * 3 + ["u"]})
     out = read_block(req("a"), reader, ScriptedJudge(), settings(schedule=steps))
     assert out.readings[0].duplicates == 6 and len(out.readings) == 4
-    assert 5 not in reader.rounds  # 4 distinct texts, but 10 Readings made
+    assert 5 not in reader.rounds
 
-
-# ------------------------------------------------------------------ a round that reads no new text
 
 def test_a_round_that_reads_no_new_text_stops_that_block_while_the_others_in_the_batch_go_on():
     reader = ScriptedReader({("a", 2): first("a")})
@@ -244,7 +239,7 @@ def test_a_sampled_round_whose_samples_all_repeat_earlier_texts_stops_the_block_
 
 
 def test_already_read_means_the_same_text_after_clean_up_so_a_change_in_inner_whitespace_is_new():
-    padded = ScriptedReader({("a", 2): f"  {first()} "})  # the test's clean strips the ends
+    padded = ScriptedReader({("a", 2): f"  {first()} "})
     assert read_block(req("a"), padded, ScriptedJudge(), settings()).stop_reason == "no_new_text"
     spaced = ScriptedReader({("a", 2): "a  r1.0"})
     out = read_block(req("a"), spaced, ScriptedJudge(), settings())

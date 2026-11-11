@@ -10,10 +10,7 @@ is the same thing for a single Block.
 
 Re-reading (ticket #5): after the first Reading, the Blocks whose best Score is still below the threshold are
 read again, round by round (SCHEDULE), each round being one batch for the Reader and one batch for the Judge;
-the highest Score wins. A Block that passes on its first Reading costs nothing extra. The flag stays the first
-Reading's (issue #9): a re-read that reaches the threshold can still be a misread, so it never clears the flag.
-A Block also stops after a round that reads no text it has not read before (`no_new_text`): on the measured
-document the rounds after such a round cost most of the extra Readings and fixed nothing.
+the highest Score wins. A Block that passes on its first Reading costs nothing extra.
 
 Per Reading: Reader -> `clean` (repetition cut, OTSL to HTML, table line breaks) -> sticky Simplified to
 Traditional repair -> Judge. With no Judge the repair is left to the document-level pass and the ink-based
@@ -71,8 +68,6 @@ class ReadStep:
     samples: int               # Readings produced for each Block in this round
 
 
-# Spec #1: each step runs only while the best Score so far is below the threshold and no step so far read only texts
-# already read (a step the Reader cannot do does not count).
 SCHEDULE = (
     ReadStep(1, "greedy", None, 1.0, 1),        # the first Reading
     ReadStep(2, "greedy", None, 1.25, 1),
@@ -285,9 +280,8 @@ def _reaches(reading: Reading | None, threshold: float) -> bool:
 
 def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSettings) -> None:
     """Rounds 2.. of the schedule, round by round over the Blocks still below the threshold: one Reader batch and one
-    Judge batch per round. A Block leaves after a round that read no new text for it. A threshold of 0 (or less)
-    turns re-reading off: nothing is below it, and a Block whose first Reading is unusable has no Score to improve on
-    either."""
+    Judge batch per round. A threshold of 0 (or less) turns re-reading off: nothing is below it, and a Block whose
+    first Reading is unusable has no Score to improve on either."""
     if settings.threshold <= 0:
         return
     for block in blocks:

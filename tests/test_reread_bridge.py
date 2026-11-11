@@ -13,9 +13,10 @@ from reader_bridge import BlockQuery, MiniCPMBridge, PaddleBridge, scaled_image
 from worker_client import WorkerError
 
 DOC = "ab" * 32
+CROP = (8, 16)
 
 
-def item(prompt, label, bbox=(0, 0, 10, 10), index=0, shape=(8, 16)):
+def item(prompt, label, bbox=(0, 0, 10, 10), index=0, shape=CROP):
     q = BlockQuery(prompt)
     q.label, q.bbox, q.block_index = label, bbox, index
     return {"image": np.full((*shape, 3), 255, np.uint8), "query": q}
@@ -31,9 +32,6 @@ def read_page(bridge, items, page=0):
 
 
 class ScaleSensitiveClient(FakeClient):
-    """Reads a crop whose (height, width) is in `by_shape` greedily as that text. FakeClient reads a Block's 1.25x
-    crop as the same text as its 1x crop, which ends the re-reading after round 2; this lets the sampled rounds run."""
-
     def __init__(self, by_shape, **kw):
         super().__init__(**kw)
         self.by_shape = by_shape
@@ -46,7 +44,7 @@ class ScaleSensitiveClient(FakeClient):
         return out
 
 
-AT_1_25X = {(10, 20): "read again at 1.25x"}  # the default item's 8x16 crop, enlarged
+AT_1_25X = {scaled_image(np.zeros((*CROP, 3), np.uint8), 1.25).shape[:2]: "read again at 1.25x"}
 
 
 def test_a_low_scoring_block_is_read_greedily_at_1x_then_at_1_25x_then_sampled_twice_with_seeds(tmp_path):
@@ -78,7 +76,7 @@ def test_the_scaled_crop_is_the_blocks_own_crop_made_1_25_times_larger_and_the_j
     b = minicpm(Spy({(50, 100): "read again at 1.25x"}, default_score=0.5), tmp_path)
     read_page(b, [item("OCR:", "text", shape=(40, 80))])
     assert sizes[0] == (40, 80) and sizes[2] == (50, 100)
-    assert sizes[3] == ("score", [(40, 80)])  # round 2's Reading is judged against the 1x crop
+    assert sizes[3] == ("score", [(40, 80)])
     assert all(s[1] == [(40, 80)] * len(s[1]) for s in sizes if s[0] == "score")
 
 
@@ -94,8 +92,6 @@ def test_the_whole_page_is_re_read_in_batches_of_the_blocks_still_low(tmp_path):
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", (0, 0, 1, 1), 0), item("Table Recognition:", "table", (2, 2, 3, 3), 1)])
     assert [d is None for d in client.decodes].count(True) == 3      # text: rounds 1, 2; table: round 1
-    # one Judge call for the page's first Readings, then one for round 2 with only the low Block's new Reading in it,
-    # which scores 0.99 and ends the re-reading
     assert [len(c) for c in client.score_calls] == [2, 1]
 
 
@@ -163,8 +159,6 @@ def test_a_crop_that_cannot_be_written_for_the_judge_is_an_encode_error_not_a_fa
 # ----------------------------------------------------------------------------- --reader paddle
 
 class FakePaddle:
-    """Reads by query, or by image (height, width) when that is in `by_shape` (as ScaleSensitiveClient does)."""
-
     def __init__(self, texts, fail_on_round2=False, by_shape=None):
         self.texts, self.calls, self.fail, self.by_shape = texts, [], fail_on_round2, by_shape or {}
 
