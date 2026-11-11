@@ -825,10 +825,11 @@ unsupported rounds, seeds), the re-read rounds through the bridges (`tests/test_
 repair, the Judge's verdicts with a fake renderer and model, the renderer's setup checks and fontconfig, the
 bridges, the JSON fields, the prompt and token limit of each block label, the
 clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
-a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, and the `--reader` options, and folder runs: which Documents a folder holds and where each one writes (`tests/test_folder_plan.py`),
-which of them are already done (`tests/test_folder_done.py`), the `settings` and the Engine's model names known from
-the options alone (`tests/test_options_only.py`), what is refused before any model loads, and the loop over the
-Documents with a fake Engine, skipping included (`tests/test_cli_folder.py`).
+a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, the `--reader` options, and folder runs: which
+Documents a folder holds and where each one writes (`tests/test_folder_plan.py`), which of them are already done
+(`tests/test_folder_done.py`), the `settings` and the Engine's model names known from the options alone
+(`tests/test_options_only.py`), what is refused before any model loads, and the loop over the Documents with a fake
+Engine, skipping, an output root inside the folder and a worker crash included (`tests/test_cli_folder.py`).
 
 The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer; except the reference-example
 test), the models, the worker environment (the Judge runs in it for either Reader) and the Judge's setup:
@@ -838,12 +839,13 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   names the hook uses.
 - `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
   is recorded as failed, and the next page gets a new worker.
-- `tests/test_folder_run.py` runs the CLI on a folder with the default Reader and the Judge at `--judge-threshold 0.98`:
-  two 2-page PDFs cut from the sample (one in a subfolder) and a corrupt PDF. Each good Document's Markdown, JSON (apart
-  from `elapsed_seconds`) and CSVs must equal a run on that PDF alone, the corrupt file must be reported, the models load
-  once and the exit code is 1. Then it deletes the corrupt PDF, which is never done, and runs the folder again into the
-  same output: both Documents are skipped, no model loads and the exit code is 0; and once more with `--force`, which redoes
-  both with the output they had. It runs one CLI process after another, so it takes the time of five runs.
+- `tests/test_folder_run.py` runs the CLI on a folder with the default Reader and the Judge at
+  `--judge-threshold 0.98`: two 2-page PDFs cut from the sample (one in a subfolder) and a corrupt PDF. Each good
+  Document's Markdown, JSON (apart from `elapsed_seconds`) and CSVs must equal a run on that PDF alone, the corrupt
+  file must be reported, the models load once and the exit code is 1. Then it deletes the corrupt PDF, which is
+  never done, and runs the folder again into the same output: both Documents are skipped, no model loads and the
+  exit code is 0; and once more with `--force`, which redoes both with the output they had. It runs one CLI process
+  after another, so it takes the time of five runs.
 - `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge` and once with
   `--judge-threshold 0` (Judge on, nothing re-read, whose Markdown must equal the `--no-judge` one), for each
   Reader, on a few pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a
