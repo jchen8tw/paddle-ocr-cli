@@ -739,6 +739,8 @@ def settings_info(args, bridge=None) -> dict:
         "reread_short_blocks": args.no_judge and not args.no_recover,  # the ink-based re-read; never with the Judge
         "markdown_merge_tables": not args.no_merge_tables,
         "markdown_ignore_labels": list(args.md_ignore_labels),
+        "script": args.script,
+        "page_markers": not args.no_page_markers,
         "csv_export": not args.no_csv,
     }
 

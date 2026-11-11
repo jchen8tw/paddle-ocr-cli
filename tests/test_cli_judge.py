@@ -71,6 +71,18 @@ def test_the_settings_record_whether_the_judge_was_on_and_its_threshold():
     assert s["reread_short_blocks"] is True  # the ink-based re-read is what runs without the Judge
 
 
+@pytest.mark.parametrize("argv, expected", [([], "auto"), (["--script", "auto"], "auto"), (["--script", "off"], "off")])
+@pytest.mark.parametrize("judge", [[], ["--no-judge"]])
+def test_the_settings_record_the_script_option_asked_for(argv, expected, judge):
+    assert pdf_ocr.settings_info(args(*argv, *judge))["script"] == expected
+
+
+@pytest.mark.parametrize("argv, expected", [([], True), (["--no-page-markers"], False)])
+@pytest.mark.parametrize("judge", [[], ["--no-judge"]])
+def test_the_settings_record_whether_page_markers_were_asked_for(argv, expected, judge):
+    assert pdf_ocr.settings_info(args(*argv, *judge))["page_markers"] is expected
+
+
 def test_with_the_judge_on_the_ink_based_reread_is_not_run_and_the_settings_say_so():
     assert pdf_ocr.settings_info(args())["reread_short_blocks"] is False
     assert pdf_ocr.settings_info(args("--no-recover", "--no-judge"))["reread_short_blocks"] is False

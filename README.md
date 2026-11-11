@@ -133,8 +133,10 @@ The JSON has these top-level keys:
   and the device. Whenever the worker runs (MiniCPM, or the Judge) it also has the `torch`, `transformers`,
   `playwright` and `pillow` versions.
 - `settings`: every option that affects the output, including `reader`, `judge` and `judge_threshold` (null
-  with `--no-judge`). With the Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can
-  do each one: `supported`) and `max_readings_per_block`.
+  with `--no-judge`), `script` (`"auto"` or `"off"`, from `--script`) and `page_markers` (`false` with
+  `--no-page-markers`). `postprocessing.script_repair` still records what the repair actually did. With the
+  Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can do each one: `supported`)
+  and `max_readings_per_block`.
 - `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`; with the Judge, a
   `judge` summary: `blocks_judged`, `blocks_reread`, `blocks_below_threshold` (still below the threshold after
   re-reading), `reread_stop_reasons` (a count per `stop_reason`), `readings_beyond_the_first` (every extra
