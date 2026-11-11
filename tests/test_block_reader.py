@@ -120,6 +120,13 @@ def test_blocks_judged_before_the_document_was_known_to_be_traditional_are_marke
     assert out[0].text == "银行"          # judged as read; the document-level repair fixes the output later
 
 
+def test_a_block_the_repair_never_applies_to_is_not_marked_as_judged_before_the_script_decision():
+    s = settings(repair=StickyScriptRepair(ScriptRepair()))
+    blocks = [req("f", "display_formula"), req("g", "algorithm"), req("t")]
+    out = read_blocks(blocks, FakeReader({"f": "x^2", "g": "for i", "t": "银行"}), FakeJudge(), s)
+    assert [o.judged_before_script_decision for o in out] == [False, False, True]
+
+
 def test_an_unrepaired_reading_has_no_text_before_repair():
     out = read_block(req("a"), FakeReader({"a": "plain"}), FakeJudge(), settings(repair=StickyScriptRepair(ScriptRepair())))
     assert out.text_before_repair is None

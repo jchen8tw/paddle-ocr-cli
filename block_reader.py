@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
 
+from script_repair import NO_REPAIR_LABELS
+
 SCORED = "scored"
 # The official verdicts. Only SCORED carries a real Score. The first three mean the Reading is unusable,
 # the last two mean scoring never happened.
@@ -255,7 +257,7 @@ def _new_reading(block: _Block, text: str, step: ReadStep, settings: ReadSetting
         reading.scale_source = scaler.source(step.scale)
     if settings.repair is not None:
         repaired, decided = settings.repair.apply(text, block.request.label, survey=survey)
-        reading.judged_before_script_decision = not decided
+        reading.judged_before_script_decision = not decided and block.request.label not in NO_REPAIR_LABELS
         if repaired != text:
             reading.text, reading.text_before_repair = repaired, text
     block.readings.append(reading)
