@@ -41,7 +41,8 @@ def fake_to_html(otsl: str) -> str:
 
 
 def clean(raw, label="text"):
-    return mr.clean_reading(raw, label, to_html=fake_to_html)
+    cleaned = mr.clean_reading(raw, label, to_html=fake_to_html)
+    return cleaned.text, cleaned.repetition_cut
 
 
 def test_ordinary_text_is_returned_stripped_and_not_counted_as_a_cut():
@@ -95,6 +96,6 @@ def test_with_the_real_paddlex_converter_a_minicpm_table_keeps_its_cell_line_bre
     """MiniCPM's raw OTSL (real newline inside a cell) through the converter the pipeline itself uses."""
     uilts = pytest.importorskip("paddlex.inference.pipelines.paddleocr_vl.uilts")
     raw = "<otsl><fcel>項目<fcel>內容<nl><fcel>蒐集\n轉換<fcel>需求1～3<nl></otsl>"
-    html, _ = mr.clean_reading(raw, "table", to_html=uilts.convert_otsl_to_html)
+    html = mr.clean_reading(raw, "table", to_html=uilts.convert_otsl_to_html).text
     assert html == ("<table><tr><td>項目</td><td>內容</td></tr>"
                     "<tr><td>蒐集<br>轉換</td><td>需求1～3</td></tr></table>")
