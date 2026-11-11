@@ -1,7 +1,7 @@
 """Re-reading low-Score Blocks (ticket #5), at the "read a Block" seam: a fake Reader and a fake Judge.
 
-The schedule (each step runs only while the best Score so far is below the threshold and the step before it read a
-text not read before):
+The schedule (each step runs only while the best Score so far is below the threshold and no step so far read only
+texts already read):
     round 1  greedy, 1x          (the first Reading)
     round 2  greedy, 1.25x
     round 3  4 samples, temperature 0.3

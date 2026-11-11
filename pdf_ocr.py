@@ -101,11 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
                         "ink-based re-read of implausibly short blocks runs instead")
     g.add_argument("--judge-threshold", type=unit_interval, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
-                   help="blocks whose first Reading scores below this are re-read (up to 10 Readings, the best one "
-                        "is kept) and flagged in the JSON (flagged) and counted on stderr. A re-read never clears "
-                        "the flag; a block whose first Reading could not be scored is flagged too. 0 turns the "
-                        "re-reading off and keeps the Scores. The Judge authors' own value, 0.98, flags and re-reads "
-                        "most Blocks for no gain on the measured document; see the README (default: %(default)s)")
+                   help="blocks whose first Reading scores below this are re-read (up to 10 Readings, stopping after "
+                        "a round that reads no new text; the best one is kept) and flagged in the JSON (flagged) and "
+                        "counted on stderr. A re-read never clears the flag; a block whose first Reading could not be "
+                        "scored is flagged too. 0 turns the re-reading off and keeps the Scores. The Judge authors' "
+                        "own value, 0.98, flags and re-reads most Blocks for no gain on the measured document; see "
+                        "the README (default: %(default)s)")
     g.add_argument("--no-recover", action="store_true",
                    help="with --no-judge, do not re-read blocks whose text is implausibly short for the ink they "
                         "contain (with the Judge on, that re-read never runs)")
