@@ -72,3 +72,14 @@ def test_the_same_readings_in_the_same_order_give_the_same_repairs():
 def test_without_opencc_nothing_is_repaired_and_the_run_goes_on():
     s = StickyScriptRepair(None)
     assert s.apply(TRAD + SIMP, "text") == (TRAD + SIMP, False)
+
+
+def test_a_reset_starts_a_new_document_that_is_not_decided_and_has_no_evidence():
+    s = sticky()
+    s.apply(TRAD, "text")
+    assert s.is_traditional
+    s.reset()
+    assert not s.is_traditional
+    assert s.apply(SIMP, "text") == (SIMP, False)
+    s.apply(TRAD[:20], "text")
+    assert not s.is_traditional                      # the evidence of the earlier document is gone too

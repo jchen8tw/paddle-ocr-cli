@@ -85,6 +85,10 @@ class StickyScriptRepair:
 
     def __init__(self, rep: "ScriptRepair | None"):
         self.rep = rep
+        self.reset()
+
+    def reset(self) -> None:
+        """Start a new document: the survey and the decision are the document's, not the converter's."""
         self.simplified = self.traditional = 0
         self.is_traditional = False
 
