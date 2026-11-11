@@ -1,6 +1,6 @@
 """A stand-in for worker/serve.py that needs no torch: the real request loop around a fake model.
 
-    python fake_worker.py [--mode ready|env-error|die|silent]
+    python fake_worker.py [--mode ready|env-error|die|silent|deaf]
 
 The prompt of a read selects the behaviour: "CRASH" kills the process, "HANG" never answers, "FAIL"
 raises inside the model, anything else is echoed.
@@ -68,6 +68,11 @@ def main() -> int:
         out.flush()
         return 2
     if mode == "silent":
+        time.sleep(120)
+        return 0
+    if mode == "deaf":  # ready, but never reads its input again: a large request fills the pipe and blocks the writer
+        out.write(json.dumps({"event": "ready", "reader": "fake", "versions": {"torch": "0.0"}}) + "\n")
+        out.flush()
         time.sleep(120)
         return 0
     out.write(json.dumps({"event": "ready", "reader": "fake", "versions": {"torch": "0.0"}}) + "\n")

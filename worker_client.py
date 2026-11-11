@@ -146,13 +146,10 @@ class WorkerClient:
             raise WorkerError("the worker is not running" + self._exit_note())
         self._next_id += 1
         req = {"id": self._next_id, **req}
+        deadline = time.monotonic() + timeout
+        self._send(json.dumps(req, ensure_ascii=False) + "\n", timeout)
         try:
-            self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            raise WorkerError("the worker closed its input" + self._exit_note(wait=True)) from None
-        try:
-            reply = self._next_message(timeout, what=f"no answer within {timeout:g}s")
+            reply = self._next_message(max(deadline - time.monotonic(), 0.0), what=f"no answer within {timeout:g}s")
             if reply.get("id") != req["id"]:
                 raise WorkerError(f"protocol error: expected an answer to request {req['id']}, got {reply!r:.200}")
         except WorkerError:
@@ -163,6 +160,30 @@ class WorkerClient:
         return reply
 
     # ------------------------------------------------------------------ plumbing
+
+    def _send(self, line: str, timeout: float) -> None:
+        """Write one request line. A worker that does not read its input fills the pipe and would block this write
+        for ever, so it happens on a helper thread that is waited for no longer than `timeout` (the worker is killed
+        then, which also ends the thread's write)."""
+        proc, failure = self._proc, []
+
+        def write():
+            try:
+                proc.stdin.write(line)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as e:
+                failure.append(e)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(timeout)
+        if writer.is_alive():
+            self._kill()
+            writer.join(5)
+            raise WorkerError(f"the request could not be sent within {timeout:g}s: the worker does not read its input"
+                              + self._exit_note())
+        if failure:
+            raise WorkerError("the worker closed its input" + self._exit_note(wait=True))
 
     def _next_message(self, timeout: float, *, what: str) -> dict:
         deadline = time.monotonic() + timeout
