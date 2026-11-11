@@ -335,7 +335,7 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(args, pipe, stack, ink, doc_hash: str):
+def attach_worker(args, pipe, stack, ink):
     """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
@@ -365,8 +365,7 @@ def attach_worker(args, pipe, stack, ink, doc_hash: str):
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair,
-                  doc_hash=doc_hash)
+    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair)
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
             paddle_model, client, tmp_dir, before_read=client.park if judge else None,
@@ -530,6 +529,9 @@ class InkReread:
 
     def set_page(self, renders: PageRenders) -> None:
         self.renders = renders
+
+    def reset(self) -> None:
+        self.renders = None
 
     def reread_with(self, bridge, args):
         def ink_reread(request, text):
@@ -936,40 +938,63 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
     return {"exported": exported, "skipped": skipped}
 
 
-def transcribe(args) -> int:
-    import contextlib
-
-    with contextlib.ExitStack() as stack:  # releases the worker and its crop folder, however the run ends
-        return _transcribe(args, stack)
+class DocumentError(Exception):
+    """A Document that cannot be transcribed at all: it does not open, has no pages, or --pages does not fit it."""
 
 
-def _transcribe(args, stack) -> int:
+class Document:
+    """An input PDF, opened: its pdfium document, its page count and the page indices to transcribe."""
+
+    def __init__(self, path: Path, pdf, indices: list[int]):
+        self.path, self.pdf, self.indices, self.total = path, pdf, indices, len(pdf)
+
+
+def open_document(path: Path, pages: str | None) -> Document:
     import pypdfium2 as pdfium
 
-    if not args.pdf.is_file():
-        sys.exit(f"error: no such file: {args.pdf}")
+    try:
+        pdf = pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as e:
+        raise DocumentError(f"cannot open {path}: {e}") from None
+    if len(pdf) == 0:
+        raise DocumentError(f"{path} has no pages")
+    try:
+        return Document(path, pdf, parse_pages(pages, len(pdf)))
+    except ValueError as e:
+        raise DocumentError(str(e)) from None
+
+
+def check_setup(args) -> None:
+    """Exit with an error unless the models, the worker environment and the Judge's renderer that the options need
+    are in place. Done once per Run, before anything is loaded."""
     if msg := missing_models_message(args):
         sys.exit(f"error: {msg}")
     if needs_worker(args) and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
     if not args.no_judge and (problems := judge_setup_problems()):
         sys.exit("error: the Judge's renderer is not set up (or use --no-judge):\n  - " + "\n  - ".join(problems))
-    try:
-        pdf = pdfium.PdfDocument(str(args.pdf))
-    except pdfium.PdfiumError as e:
-        sys.exit(f"error: cannot open {args.pdf}: {e}")
-    total = len(pdf)
-    if total == 0:
-        sys.exit(f"error: {args.pdf} has no pages")
-    try:
-        indices = parse_pages(args.pages, total)
-    except ValueError as e:
-        sys.exit(f"error: {e}")
 
-    out_dir = args.output_dir or Path("output") / args.pdf.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-    doc_hash = hashlib.sha256(args.pdf.read_bytes()).hexdigest()  # also seeds the sampling of the re-reads
 
+class Engine:
+    """What a Run loads once and every Document of it shares: the Layout model and the Reader (`pipe`, with the
+    Reader hook installed), the `device`, and, when the options need the worker, its `ready` event and the `bridge`.
+    `load_started` is when the loading began. The worker is released when the Run's ExitStack closes."""
+
+    def __init__(self, pipe, device: str, bridge, ink: InkReread, ready: dict | None, load_started: float | None = None):
+        self.pipe, self.device, self.bridge, self.ink, self.ready = pipe, device, bridge, ink, ready
+        self.load_started = load_started
+
+    def begin_document(self, doc_hash: str) -> None:
+        """Start a Document: forget everything that belongs to the previous one. `doc_hash` seeds the sampling of
+        the re-read Rounds."""
+        if self.bridge is not None:
+            self.bridge.begin_document(doc_hash)  # Readings, Scores, Verdicts, counters, page, sticky script repair
+        self.ink.reset()
+
+
+def load_engine(args, stack) -> Engine:
+    """Load the models once per Run (after check_setup): the Layout model, the worker, and the bridge with the
+    Reader hook installed. The worker and the crop folder are released when `stack` closes."""
     device = pick_device(args.device)
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
@@ -977,8 +1002,21 @@ def _transcribe(args, stack) -> int:
     bridge = ready = None
     ink = InkReread()
     if needs_worker(args):
-        bridge, ready = attach_worker(args, pipe, stack, ink, doc_hash)
+        bridge, ready = attach_worker(args, pipe, stack, ink)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
+    return Engine(pipe, device, bridge, ink, ready, t_start)
+
+
+def transcribe_document(engine: Engine, args, document: Document, out_dir: Path, started: float | None = None) -> dict:
+    """Transcribe one Document with a loaded Engine and write its Markdown, JSON and CSVs into `out_dir`.
+    Returns the pages that failed ({page index: error}). `elapsed_seconds` counts from `started`: the Document's own
+    start, or, for a single-PDF Run, the start of the model load."""
+    t_start = time.time() if started is None else started
+    pdf, indices, total = document.pdf, document.indices, document.total
+    out_dir.mkdir(parents=True, exist_ok=True)
+    doc_hash = hashlib.sha256(document.path.read_bytes()).hexdigest()  # also seeds the sampling of the re-reads
+    engine.begin_document(doc_hash)
+    pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
 
     ok: list[tuple[int, object]] = []
     meta: dict[int, dict] = {}
@@ -1013,7 +1051,6 @@ def _transcribe(args, stack) -> int:
         finally:
             page.close()
 
-    stack.close()  # the worker is not needed any more; free its GPU memory before the post-processing
     outcomes = bridge.outcomes if bridge else {}
 
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
@@ -1042,18 +1079,18 @@ def _transcribe(args, stack) -> int:
         pages[idx] = {"page": idx + 1, "error": msg, "blocks": []}
         md_parts[idx] = f"<!-- page {idx + 1} failed: {msg} -->"
 
-    stem = args.pdf.stem
+    stem = document.path.stem
     md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
     md_path.write_text("\n\n".join(md_parts[i] for i in sorted(md_parts)) + "\n", encoding="utf-8")
     doc = {
         "source": {
-            "file": args.pdf.name,
+            "file": document.path.name,
             "sha256": doc_hash,
             "page_count": total,
             "pages_processed": [i + 1 for i in indices],
             "pages_failed": [i + 1 for i in sorted(errors)],
         },
-        "engine": engine_info(args, device, ready),
+        "engine": engine_info(args, device, engine.ready),
         "settings": settings_info(args, bridge),
         "postprocessing": {
             "tables_with_line_breaks_fixed": tables_fixed,
@@ -1071,6 +1108,24 @@ def _transcribe(args, stack) -> int:
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
+    return errors
+
+
+def transcribe(args) -> int:
+    """A Run on one PDF: load the Engine, then transcribe the Document."""
+    import contextlib
+
+    if not args.pdf.is_file():
+        sys.exit(f"error: no such file: {args.pdf}")
+    check_setup(args)
+    try:
+        document = open_document(args.pdf, args.pages)
+    except DocumentError as e:
+        sys.exit(f"error: {e}")
+    with contextlib.ExitStack() as stack:  # releases the worker and its crop folder when the Run ends, however it ends
+        engine = load_engine(args, stack)
+        errors = transcribe_document(engine, args, document, args.output_dir or Path("output") / args.pdf.stem,
+                                     started=engine.load_started)
     return 1 if errors else 0
 
 

@@ -329,12 +329,18 @@ class ReaderBridge:
                  repair=None, ink_reread=None, doc_hash: str = ""):
         self.client, self.tmp_dir, self.to_html = client, Path(tmp_dir), to_html
         self.judge, self.threshold, self.repair, self.ink_reread = judge, judge_threshold, repair, ink_reread
+        self.begin_document(doc_hash)
+
+    def begin_document(self, doc_hash: str = "") -> None:
+        """Forget what the previous Document left here; the worker, the schedule and the options stay."""
         self.doc_hash = doc_hash  # with the page and the Block, what the sampling seeds of the re-read rounds are made of
         self.repetition_cuts = 0
         self.current_page = 0
         self.scale_sources: dict[str, int] = collections.Counter()  # scaled images made, by where they came from
         self.page_source = None  # set per page by the caller: lets round 2 re-render the page (see BlockScaler)
         self.outcomes: dict[tuple, block_reader.BlockResult] = {}
+        if self.repair is not None:
+            self.repair.reset()
 
     def _reader(self, kwargs: dict, crops: CropFiles):  # a block_reader.Reader
         raise NotImplementedError
