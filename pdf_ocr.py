@@ -4,6 +4,7 @@
     python pdf_ocr.py input.pdf                  # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
     python pdf_ocr.py input.pdf -o out --pages 1-5,9
     python pdf_ocr.py scans/                     # every PDF under scans/ -> output/scans/<sub>/<name>/ (one model load)
+    python pdf_ocr.py scans/                     # again: the Documents already done are skipped (--force redoes them)
     python pdf_ocr.py input.pdf --reader paddle  # PaddleOCR-VL-1.6 instead of MiniCPM-OCR-1.0
 
 Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks -> the Reader
