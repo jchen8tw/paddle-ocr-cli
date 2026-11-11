@@ -7,22 +7,13 @@ import json
 import types
 
 import numpy as np
-import pypdfium2 as pdfium
 
 import pdf_ocr
-from fakes import engine_with
+from fakes import blank_pdf, engine_with
 from reader_bridge import BlockQuery
 
 TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"
 LOOP = "前言" + "ABCDEFGHIJ" * 20  # a repetition loop, cut back to "前言" and counted
-
-
-def pdf_of_size(path, height, pages=1):
-    pdf = pdfium.PdfDocument.new()
-    for _ in range(pages):
-        pdf.new_page(200, height)
-    pdf.save(str(path))
-    return path
 
 
 def transcribe(engine, pdf, out):
@@ -34,7 +25,7 @@ def transcribe(engine, pdf, out):
 
 
 def test_a_document_after_another_in_the_same_engine_comes_out_as_if_it_were_alone(tmp_path):
-    first, second = pdf_of_size(tmp_path / "first.pdf", 300, pages=2), pdf_of_size(tmp_path / "second.pdf", 301)
+    first, second = blank_pdf(tmp_path / "first.pdf", pages=2), blank_pdf(tmp_path / "second.pdf", height=301)
     engine, client = engine_with(tmp_path)
     client.texts = {"Text Recognition:": TRAD + LOOP}  # a Traditional document, with repetition loops
     a, _ = transcribe(engine, first, tmp_path / "a")

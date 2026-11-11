@@ -62,6 +62,11 @@ One invocation of the tool: one Document, or every Document under a folder, all 
 of settings.
 _Avoid_: batch, job
 
+**Already done**:
+A Document whose JSON from an earlier Run shows the same PDF, no failed page, and the same settings and model
+names as this Run would write. A folder Run skips it unless `--force`.
+_Avoid_: finished, cached, up to date
+
 **Engine**:
 The full set of models and library versions used in one Run (Layout model, Reader, Judge), not any
 single model.

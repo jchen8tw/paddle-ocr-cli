@@ -974,6 +974,10 @@ class PlannedDocument:
     done: bool = False
     reason: str = ""
 
+    @property
+    def relative_posix(self) -> str:
+        return self.relative.as_posix()
+
 
 class PlanError(Exception):
     """A folder Run that cannot start: it has no Documents, a folder cannot be read, or Documents would write over
@@ -1001,12 +1005,13 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
     by_dir: dict[Path, list[PlannedDocument]] = {}
     for d in documents:
         by_dir.setdefault(d.out_dir, []).append(d)
-    problems = [f"{', '.join(str(d.relative) for d in same)} all write to {out_dir}"
+    problems = [f"{', '.join(d.relative_posix for d in same)} all write to {out_dir}"
                 for out_dir, same in by_dir.items() if len(same) > 1]
     for d in documents:
         for folder in (d.out_dir, *d.out_dir.parents):
             if folder.name in ("imgs", "csv"):
-                problems += [f"{d.relative} writes to {d.out_dir}, inside the {folder.name}/ of {outer.relative}"
+                problems += [f"{d.relative_posix} writes to {d.out_dir}, "
+                             f"inside the {folder.name}/ of {outer.relative_posix}"
                              for outer in by_dir.get(folder.parent, [])]
     if problems:
         raise PlanError("the output folders of these Documents collide (nothing was written):\n  "
@@ -1077,6 +1082,9 @@ class Document:
 
     def __init__(self, path: Path, pdf, indices: list[int]):
         self.path, self.pdf, self.indices, self.total = path, pdf, indices, len(pdf)
+
+    def close(self) -> None:
+        self.pdf.close()
 
 
 def open_document(path: Path, pages: str | None) -> Document:
@@ -1216,7 +1224,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     stem = document.path.stem
     md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
     md_path.write_text("\n\n".join(md_parts[i] for i in sorted(md_parts)) + "\n", encoding="utf-8")
-    doc = {
+    record = {
         "source": {
             "file": document.path.name,
             "sha256": doc_hash,
@@ -1237,7 +1245,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
         "elapsed_seconds": round(time.time() - t_start, 1),
         "pages": [pages[i] for i in sorted(pages)],
     }
-    json_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if hint := memory_hint(errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
@@ -1257,6 +1265,7 @@ def transcribe(args) -> int:
     except DocumentError as e:
         sys.exit(f"error: {e}")
     with contextlib.ExitStack() as stack:  # releases the worker and its crop folder when the Run ends, however it ends
+        stack.callback(document.close)
         engine = load_engine(args, stack)
         errors = transcribe_document(engine, args, document, args.output_dir or Path("output") / args.pdf.stem,
                                      started=engine.load_started)
@@ -1274,39 +1283,43 @@ def transcribe_folder(args) -> int:
         plan = plan_run(args.pdf, args.output_dir, args)
     except PlanError as e:
         sys.exit(f"error: {e}")
-    todo = [(i, planned) for i, planned in enumerate(plan, 1) if not planned.done]
+    labels = [f"[{i}/{len(plan)}] {planned.relative_posix}" for i, planned in enumerate(plan, 1)]
+    todo = [(label, planned) for label, planned in zip(labels, plan) if not planned.done]
     skipped = len(plan) - len(todo)
     print(f"found {len(plan)} Documents in {args.pdf} ({skipped} already done)", file=sys.stderr)
-    for i, planned in enumerate(plan, 1):
+    for label, planned in zip(labels, plan):
         if planned.done:
-            print(f"[{i}/{len(plan)}] {planned.relative.as_posix()} skipped: already done", file=sys.stderr)
+            print(f"{label} skipped: already done", file=sys.stderr)
     written, failed, partly_failed = 0, [], []  # partly_failed: written, but with failed pages
+
+    def fail(label: str, planned: PlannedDocument, reason: str) -> None:
+        print(f"{label} FAILED: {reason}", file=sys.stderr)
+        failed.append(f"{planned.relative_posix}: {reason}")
+
     with contextlib.ExitStack() as stack:
         if todo:
             check_setup(args)
             engine = load_engine(args, stack)
-        for i, planned in todo:
-            label = f"[{i}/{len(plan)}] {planned.relative.as_posix()}"
+        for label, planned in todo:
             document = None
             try:
                 document = open_document(planned.path, None)
                 print(f"{label} ({document.total} pages)", file=sys.stderr)
                 errors = transcribe_document(engine, args, document, planned.out_dir)
-            except Exception as e:  # the Run goes on; the next Run retries the Document, which has no JSON
-                reason = str(e) if isinstance(e, DocumentError) else f"{type(e).__name__}: {e}"
-                if not isinstance(e, DocumentError):
-                    traceback.print_exc()
-                print(f"{label} FAILED: {reason}", file=sys.stderr)
-                failed.append(f"{planned.relative.as_posix()}: {reason}")
+            except DocumentError as e:  # the Run goes on; the next Run retries the Document, which has no JSON
+                fail(label, planned, str(e))
+            except Exception as e:
+                traceback.print_exc()
+                fail(label, planned, f"{type(e).__name__}: {e}")
             else:
                 written += 1
                 if errors:
                     pages = ", ".join(str(idx + 1) for idx in sorted(errors))
-                    partly_failed.append(f"{planned.relative.as_posix()}: {'page' if len(errors) == 1 else 'pages'} "
+                    partly_failed.append(f"{planned.relative_posix}: {'page' if len(errors) == 1 else 'pages'} "
                                          f"{pages} failed (recorded in its JSON)")
             finally:
                 if document is not None:
-                    document.pdf.close()
+                    document.close()
     print(f"{len(plan)} Documents: {written} written, {skipped} skipped, {len(failed)} failed", file=sys.stderr)
     for line in failed + partly_failed:
         print(f"  {line}", file=sys.stderr)
