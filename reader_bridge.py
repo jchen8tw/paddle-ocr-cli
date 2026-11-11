@@ -257,7 +257,8 @@ class _MiniCPMRead:
     def __init__(self, client, crops: CropFiles | None, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
 
-    def supports(self, step) -> bool:
+    @staticmethod
+    def supports(step) -> bool:
         return True
 
     def read(self, requests, step, seeds):
@@ -288,7 +289,8 @@ class _PaddleRead:
     def __init__(self, model, kwargs: dict, before, after):
         self.model, self.kwargs, self.before, self.after = model, kwargs, before, after
 
-    def supports(self, step) -> bool:
+    @staticmethod
+    def supports(step) -> bool:
         return step.decode == "greedy"
 
     def read(self, requests, step, seeds):
@@ -310,6 +312,15 @@ class _PaddleRead:
                 raise
             return [e] * len(requests)
         return [[r.get("result") or ""] for r in results]
+
+
+READERS = {"minicpm": _MiniCPMRead, "paddle": _PaddleRead}  # by the name --reader takes
+
+
+def reader_supports(reader: str):
+    """The `supports` of the Reader that --reader names, for when there is no bridge (no worker has started): the
+    function the bridge's own Reader answers with."""
+    return READERS[reader].supports
 
 
 class ReaderBridge:

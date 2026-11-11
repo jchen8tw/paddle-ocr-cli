@@ -31,6 +31,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import block_reader
+import reader_bridge
 from script_repair import NO_REPAIR_LABELS, ScriptRepair, is_traditional
 
 ROOT = Path(__file__).resolve().parent
@@ -283,15 +284,24 @@ def start_worker(args):
         sys.exit(f"error: {e}")
 
 
+def engine_models(args) -> dict:
+    """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
+    from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
+    (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
+    return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
+            **({} if args.no_judge else {"judge": JUDGE_MODEL_DIR})}
+
+
 def engine_info(args, device: str, ready: dict | None) -> dict:
-    """The JSON `engine` section: the Layout model and the Reader, with the library versions."""
-    engine = {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader]}
+    """The JSON `engine` section: the Layout model, the Reader and the Judge, with the library versions."""
+    models = engine_models(args)
+    engine = {"layout_model": models["layout_model"], "reader": models["reader"]}
     if args.reader == "paddle":
         engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
     engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
+    if "judge" in models:
+        engine["judge"] = models["judge"]
     if ready:
-        if ready.get("judge") and not args.no_judge:
-            engine["judge"] = ready["judge"]
         engine.update(ready["versions"])
     engine["device"] = device
     return engine
@@ -346,7 +356,6 @@ def attach_worker(args, pipe, stack, ink):
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
 
-    import reader_bridge
     from script_repair import ScriptRepair, StickyScriptRepair
 
     try:
@@ -726,16 +735,18 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
 def reread_schedule_info(supports) -> list[dict]:
     """The re-read schedule for the JSON `settings`, with whether the Reader of this run can do each round."""
     return [{"round": s.round, "decode": s.decode, "temperature": s.temperature, "scale": s.scale, "samples": s.samples,
-             **({} if supports is None else {"supported": bool(supports(s))})} for s in block_reader.SCHEDULE]
+             "supported": bool(supports(s))} for s in block_reader.SCHEDULE]
 
 
 def settings_info(args, bridge=None) -> dict:
-    """The JSON `settings` section."""
+    """The JSON `settings` section, known from the options alone: a re-read Round is `supported` when the Reader that
+    --reader names can do it (a live `bridge` answers with that same Reader's rule)."""
+    supports = reader_bridge.reader_supports(args.reader) if bridge is None else bridge.supports
     return {
         "reader": args.reader,
         "judge": not args.no_judge,
         "judge_threshold": None if args.no_judge else args.judge_threshold,
-        **({} if args.no_judge else {"reread_schedule": reread_schedule_info(bridge.supports if bridge else None),
+        **({} if args.no_judge else {"reread_schedule": reread_schedule_info(supports),
                                      "max_readings_per_block": block_reader.MAX_READINGS}),
         "dpi": args.dpi,
         "layout_threshold": args.layout_threshold,

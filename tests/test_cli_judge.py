@@ -248,10 +248,11 @@ def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
     s = pdf_ocr.settings_info(args())
     assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
         (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
-    assert "supported" not in s["reread_schedule"][0] and s["max_readings_per_block"] == 10
-    bridge = types.SimpleNamespace(supports=lambda step: step.decode == "greedy")
-    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"), bridge)["reread_schedule"]] == [
+    assert [r["supported"] for r in s["reread_schedule"]] == [True] * 4 and s["max_readings_per_block"] == 10
+    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"))["reread_schedule"]] == [
         True, True, False, False]
+    bridge = types.SimpleNamespace(supports=lambda step: step.round == 1)  # a live bridge answers for its Reader
+    assert [r["supported"] for r in pdf_ocr.settings_info(args(), bridge)["reread_schedule"]] == [True, False, False, False]
     assert "reread_schedule" not in pdf_ocr.settings_info(args("--no-judge"))
 
 
