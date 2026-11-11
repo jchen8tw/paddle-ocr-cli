@@ -262,3 +262,12 @@ def test_other_failures_give_no_memory_hint():
     other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
     assert pdf_ocr.memory_hint({1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
     assert pdf_ocr.memory_hint({}, {}) is None
+
+
+def test_judged_blocks_without_an_outcome_are_found_by_page_and_box():
+    block = lambda label, bbox: types.SimpleNamespace(label=label, bbox=bbox)  # noqa: E731
+    res = {"parsing_res_list": [block("text", [1, 2, 3, 4]), block("text", [5, 6, 7, 8]), block("chart", [9, 9, 9, 9]),
+                                block("table", [0.4, 0.6, 20.2, 30.9])]}
+    outcomes = {(2, (1, 2, 3, 4)): outcome(judged=True)}
+    assert pdf_ocr.blocks_without_outcome(2, res, outcomes) == [("text", (5, 6, 7, 8)), ("table", (0, 0, 20, 30))]
+    assert len(pdf_ocr.blocks_without_outcome(3, res, outcomes)) == 3  # another page's outcomes do not count

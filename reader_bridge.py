@@ -377,7 +377,14 @@ class ReaderBridge:
         finally:
             crops.cleanup()
         for request, result in zip(requests, results):
-            self.outcomes[(self.current_page, request.bbox)] = result
+            key = (self.current_page, request.bbox)
+            if request.bbox is None:
+                print(f"warning: page {self.current_page + 1}: a Block came without a box; its Score cannot be "
+                      "matched to it in the JSON", file=sys.stderr)
+            elif key in self.outcomes:
+                print(f"warning: page {self.current_page + 1}: two Blocks have the same box {request.bbox}; only the "
+                      "later one's Score reaches the JSON", file=sys.stderr)
+            self.outcomes[key] = result
         for result in results:
             yield {"result": result.text}
 

@@ -609,6 +609,17 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes
     }
 
 
+def blocks_without_outcome(idx: int, res, outcomes: dict) -> list[tuple[str, tuple]]:
+    """(label, box) of the Blocks of a page that should have been judged but have no outcome, which the outcomes
+    (keyed by page and box) cannot match to the page's Blocks. Expected to be empty."""
+    missing = []
+    for b in res["parsing_res_list"]:
+        bbox = tuple(int(v) for v in b.bbox)
+        if block_reader.judge_category(b.label) is not None and (idx, bbox) not in outcomes:
+            missing.append((b.label, bbox))
+    return missing
+
+
 def add_judge_fields(block: dict, outcome) -> None:
     """The Judge's verdict on a Block (nothing for a Block that is never judged: charts, seals, figures)."""
     if outcome.text_before_reread is not None:
@@ -985,6 +996,10 @@ def _transcribe(args, stack) -> int:
                 recovered = recover_short_blocks(pipe, page, res, img, scale, args)  # PaddleOCR-VL, as before
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
+            if bridge is not None and not args.no_judge:
+                for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
+                    print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
+                          "Reader hook, or its box changed after reading)", file=sys.stderr)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
             print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
