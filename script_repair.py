@@ -2,6 +2,13 @@
 and the sticky per-Reading decision the Judge path uses (no GPU, no paddle; opencc is imported lazily)."""
 from __future__ import annotations
 
+from types import MappingProxyType
+from typing import Final, Mapping
+
+# Symbols that cannot be encoded in Big5, and the Big5 glyph a Traditional document prints for each.
+BIG5_LOOKALIKES: Final[Mapping[str, str]] = MappingProxyType({"≥": "≧", "≤": "≦"})
+_TO_BIG5_GLYPHS = str.maketrans(dict(BIG5_LOOKALIKES))
+
 
 class ScriptRepair:
     """Repair Simplified-Chinese characters inside a Traditional-Chinese document.
@@ -9,7 +16,8 @@ class ScriptRepair:
     PaddleOCR-VL tends to drift to Simplified forms (银行, 医院, 细胞) when reading Traditional text.
     A character is treated as drift only if it cannot be encoded in Big5 (so it is not valid
     Traditional) and OpenCC maps it to something else. Valid Traditional characters that merely also
-    exist in Simplified (后, 干, 里, 台, 表) are never touched.
+    exist in Simplified (后, 干, 里, 台, 表) are never touched. The same rule picks the glyph of `≥` and
+    `≤`: they are not in Big5, so they are written as `≧` and `≦` (BIG5_LOOKALIKES).
     """
 
     def __init__(self):
@@ -55,6 +63,9 @@ class ScriptRepair:
         return simp, trad
 
     def fix(self, text: str) -> str:
+        """The text repaired, for a document already decided Traditional: BIG5_LOOKALIKES as their Big5 glyph, and
+        each Simplified-only character as its Traditional form."""
+        text = text.translate(_TO_BIG5_GLYPHS)
         if not any(self.is_simplified_only(c) for c in text):
             return text
         conv = self.s2t.convert(text)  # phrase-aware (e.g. 头发 -> 頭髮)

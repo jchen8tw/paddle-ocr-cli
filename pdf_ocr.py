@@ -30,7 +30,7 @@ from pathlib import Path
 
 import block_reader
 from minicpm_reader import unwrap_symbols
-from script_repair import NO_REPAIR_LABELS, ScriptRepair, is_traditional
+from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
 
 ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
@@ -152,7 +152,8 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
 # --------------------------------------------------------------------------- script repair
 
 def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, dict]:
-    """Fix Simplified drift in the block objects of `results` in place.
+    """Fix Simplified drift, and write `≥`/`≤` as the Big5 glyphs `≧`/`≦`, in the block objects of `results` in
+    place, once the whole document is decided Traditional (ScriptRepair.fix).
 
     Returns (summary for the JSON, {(page_idx, block_idx): original_text} for changed blocks).
     """
@@ -175,14 +176,15 @@ def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, d
     is_trad = is_traditional(simp, trad)
     info.update(simplified_chars=simp, traditional_chars=trad,
                 document_script="traditional" if is_trad else "not traditional")
-    if not is_trad or simp == 0:
+    if not is_trad:
         return info, raw
     for idx, i, b in blocks:
         fixed = rep.fix(b.content)
         if fixed != b.content:
             raw[(idx, i)] = b.content
             b.content = fixed
-    info.update(applied=True, blocks_changed=len(raw))
+    info.update(applied=True, blocks_changed=len(raw),
+                big5_symbols_changed=sum(text.count(c) for text in raw.values() for c in BIG5_LOOKALIKES))
     return info, raw
 
 

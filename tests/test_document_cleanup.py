@@ -1,5 +1,6 @@
 """The Block-level clean-up after the pipeline has read every page (pdf_ocr): the lone symbols that a run without a
-bridge (--reader paddle --no-judge) only gets here (no GPU, no models)."""
+bridge (--reader paddle --no-judge) only gets here, and the document-level script repair, which writes `≥`/`≤` as the
+Big5 glyphs `≧`/`≦` in a Traditional document (no GPU, no models)."""
 import types
 
 import pytest
@@ -7,6 +8,8 @@ import pytest
 import minicpm_reader as mr
 import pdf_ocr
 from test_reading_cleanup import CORPUS
+
+TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"  # 39 Traditional-only characters
 
 
 def blk(label, content):
@@ -39,3 +42,35 @@ def test_on_text_a_bridge_has_cleaned_the_pass_changes_and_counts_nothing(strip)
     blocks = [blk("text", t) for t in cleaned]
     assert pdf_ocr.unwrap_block_symbols(pages(blocks)) == 0
     assert [b.content for b in blocks] == cleaned
+
+
+# --- the document-level script repair: the Big5 glyph of >= and <= ----------------------------------------
+
+def test_a_document_decided_traditional_writes_the_big5_glyphs_even_with_no_simplified_character():
+    blocks = [blk("text", TRAD), blk("text", "年滿15足歲≥者"), blk("footnote", "≤65歲"), blk("display_formula", "x ≥ 1")]
+    info, raw = pdf_ocr.repair_script(pages(blocks), "auto")
+    assert [b.content for b in blocks] == [TRAD, "年滿15足歲≧者", "≦65歲", "x ≥ 1"]
+    assert (info["document_script"], info["simplified_chars"], info["applied"]) == ("traditional", 0, True)
+    assert (info["blocks_changed"], info["big5_symbols_changed"]) == (2, 2)
+    assert raw == {(0, 1): "年滿15足歲≥者", (0, 2): "≤65歲"}
+
+
+def test_blocks_changed_counts_either_fix_and_big5_symbols_changed_counts_each_symbol():
+    blocks = [blk("text", TRAD), blk("text", "≥≥與≤"), blk("text", "银行"), blk("text", "银行≥")]
+    info, _ = pdf_ocr.repair_script(pages(blocks), "auto")
+    assert [b.content for b in blocks[1:]] == ["≧≧與≦", "銀行", "銀行≧"]
+    assert (info["blocks_changed"], info["big5_symbols_changed"]) == (3, 4)
+
+
+def test_an_undecided_document_keeps_ge_and_le():
+    blocks = [blk("text", TRAD[:20]), blk("text", "年滿15足歲≥者")]
+    info, raw = pdf_ocr.repair_script(pages(blocks), "auto")
+    assert blocks[1].content == "年滿15足歲≥者" and raw == {}
+    assert info["applied"] is False and info["document_script"] == "not traditional"
+    assert "big5_symbols_changed" not in info
+
+
+def test_script_off_keeps_ge_and_le():
+    blocks = [blk("text", TRAD), blk("text", "年滿15足歲≥者")]
+    assert pdf_ocr.repair_script(pages(blocks), "off") == ({"mode": "off", "applied": False}, {})
+    assert blocks[1].content == "年滿15足歲≥者"
