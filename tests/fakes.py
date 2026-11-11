@@ -1,6 +1,8 @@
 """Test doubles shared by the bridge and the Run tests."""
 from pathlib import Path
 
+import pypdfium2 as pdfium
+
 import pdf_ocr
 from reader_bridge import BlockQuery, MiniCPMBridge
 from script_repair import ScriptRepair, StickyScriptRepair
@@ -107,3 +109,12 @@ def engine_with(tmp_path):
                            repair=StickyScriptRepair(ScriptRepair()))
     ready = {"judge": "fake-judge", "versions": {"torch": "0.0"}}
     return pdf_ocr.Engine(FakePipe(bridge), "cpu", bridge, pdf_ocr.InkReread(), ready), client
+
+
+def blank_pdf(path, pages=1, height=300):
+    """A PDF of `pages` empty pages, 200 points wide."""
+    pdf = pdfium.PdfDocument.new()
+    for _ in range(pages):
+        pdf.new_page(200, height)
+    pdf.save(str(path))
+    return path
