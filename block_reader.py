@@ -277,7 +277,10 @@ def _passed(block: _Block, settings: ReadSettings) -> bool:
 
 def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSettings) -> None:
     """Rounds 2.. of the schedule, round by round over the Blocks still below the threshold: one Reader batch and one
-    Judge batch per round."""
+    Judge batch per round. A threshold of 0 (or less) turns re-reading off: nothing is below it, and a Block whose
+    first Reading is unusable has no Score to improve on either."""
+    if settings.threshold <= 0:
+        return
     for block in blocks:
         if block.readings[0].verdict in NOT_SCORED_VERDICTS:
             continue  # the Judge is not working: there is no Score to improve on, so no re-read

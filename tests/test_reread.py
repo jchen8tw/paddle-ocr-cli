@@ -352,3 +352,14 @@ def test_the_winners_repair_record_is_the_winners_own():
     reader = ScriptedReader({("a", 1): "银行", ("a", 2): trad + "x"})
     out = read_block(req("a"), reader, ScriptedJudge({"銀行": 0.5, trad + "x": 0.3}), settings(repair=repair))
     assert (out.text, out.text_before_repair) == ("銀行", "银行")
+
+
+# ------------------------------------------------------------------ threshold 0 turns re-reading off
+
+@pytest.mark.parametrize("verdict", ["precheck_reject", "render_error", "missing_original_image"])
+def test_threshold_zero_never_re_reads_even_when_the_first_reading_is_unusable(verdict):
+    reader, judge = ScriptedReader(), ScriptedJudge(default=(verdict, None))
+    out = read_block(req("a"), reader, judge, settings(threshold=0.0))
+    assert reader.rounds == [1] and len(judge.calls) == 1
+    assert out.readings is None and out.stop_reason is None
+    assert (out.text, out.score, out.verdict) == (first(), None, verdict)
