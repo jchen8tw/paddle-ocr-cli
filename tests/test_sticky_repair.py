@@ -72,3 +72,18 @@ def test_the_same_readings_in_the_same_order_give_the_same_repairs():
 def test_without_opencc_nothing_is_repaired_and_the_run_goes_on():
     s = StickyScriptRepair(None)
     assert s.apply(TRAD + SIMP, "text") == (TRAD + SIMP, False)
+
+
+# --- the Big5 glyph of >= and <= (issue #7) ---------------------------------------------------------------
+
+def test_a_decided_traditional_document_gets_the_big5_glyphs_even_in_text_without_simplified_characters():
+    assert ScriptRepair().fix("年滿15足歲≥者，≤65歲") == "年滿15足歲≧者，≦65歲"
+    assert ScriptRepair().fix("银行≥") == "銀行≧"
+
+
+def test_the_sticky_repair_gives_the_judge_the_big5_glyph_only_once_decided():
+    s = sticky()
+    assert s.apply("年滿15足歲≥者", "text") == ("年滿15足歲≥者", False)
+    s.apply(TRAD, "text")
+    assert s.apply("年滿15足歲≥者", "text") == ("年滿15足歲≧者", True)
+    assert s.apply("x ≥ 1", "inline_formula") == ("x ≥ 1", True)

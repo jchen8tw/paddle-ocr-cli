@@ -12,9 +12,9 @@ Re-reading (ticket #5): after the first Reading, the Blocks whose best Score is 
 read again, round by round (SCHEDULE), each round being one batch for the Reader and one batch for the Judge;
 the highest Score wins. A Block that passes on its first Reading costs nothing extra.
 
-Per Reading: Reader -> `clean` (repetition cut, OTSL to HTML, table line breaks) -> sticky Simplified to
-Traditional repair -> Judge. With no Judge the repair is left to the document-level pass and the ink-based
-re-read of implausibly short Blocks runs instead.
+Per Reading: Reader -> `clean` (repetition cut, math delimiters, lone symbols, OTSL to HTML, table line breaks) ->
+sticky Simplified to Traditional repair -> Judge. With no Judge the repair is left to the document-level pass and the
+ink-based re-read of implausibly short Blocks runs instead.
 """
 from __future__ import annotations
 
