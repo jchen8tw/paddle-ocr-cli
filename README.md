@@ -277,17 +277,28 @@ PaddleOCR-VL is right or better in all 10:
 - **MiniCPM loses on rare Traditional characters.** 躉 became 蔓, 薈 or (after a re-read) 薑 in three footnotes,
   鑽 became 鑛, 閣 became 閤, 績 became 續, 寶 became 實, 屆 became 居: 9 wrong characters in 8 Blocks, all read
   correctly by PaddleOCR-VL. The same 躉 weakness shows on the brochure below.
-- **MiniCPM writes symbols as LaTeX.** On page 38 `≧` came out as `$\geq$` or `\geq` in three text Blocks (16
-  errors against PaddleOCR-VL's 9, which also wrapped two of them in `$`). The official SDK's LaTeX repair does
-  not fix this. It fixes only formula syntax, in formula Blocks, and has no table of symbols. The tool now writes
-  such a lone symbol as its character, and as `≧` in a Traditional document
-  ([issue #7](https://github.com/jchen8tw/paddle-ocr-cli/issues/7); see "The MiniCPM-OCR-1.0 Reader"). The counts
-  here were measured before that step.
+- **MiniCPM writes symbols as LaTeX.** On page 38, 16 of its 17 errors (PaddleOCR-VL: 9) were LaTeX in three text
+  Blocks. One Block held a lone symbol, `(n) \( \geq \) 10` for the printed `(n)≧10` (6 errors). One held an inline
+  formula, `$ t \geq 10 $` for `t≧10` (6). One held `$ t= $` and `$ t $` around plain letters (4). PaddleOCR-VL
+  wrote the first as `≥` (1 error, the wrong glyph) and wrapped the other two in `$` as well. The official SDK's
+  LaTeX repair does not fix this. It fixes only formula syntax, in formula Blocks, and has no table of symbols. The
+  tool now writes a lone symbol as its character, and `≥`/`≤` as `≧`/`≦` in a Traditional document
+  ([issue #7](https://github.com/jchen8tw/paddle-ocr-cli/issues/7); see "The MiniCPM-OCR-1.0 Reader"). That fixes
+  the first Block for both Readers. The other two hold more than one symbol and are left as they are. The counts
+  in this section were measured before that step; "After issue #7" below has the new ones.
 - **MiniCPM wins on Simplified drift.** PaddleOCR-VL wrote 16 Simplified characters (资 别 项) into the
   Traditional text, in 16 Blocks, all fixed by `--script auto`; without that repair they would be 16 more errors.
   MiniCPM wrote none in these runs (0 repairs), and 1 at 144 DPI.
 - **MiniCPM needs less memory when it reads alone** (5,408 MiB against 9,657 MiB) but is 24 % slower (234 s
   against 188 s).
+
+**After issue #7** (lone LaTeX symbols written as their character, `≧`/`≦` in a Traditional document). With each
+Reader's defaults (Judge on, threshold 0.5, 216 DPI), MiniCPM has 27 wrong characters (0.163 %, was 33) and
+PaddleOCR-VL 18 (0.109 %, was 19). One run each, before and after, 2026-11-11. Of the 321 Blocks, the only one whose
+text changed is page 38's `(n)≧10`, for both Readers. Page 38 goes from 17 to 11 errors for MiniCPM and from 9 to 8
+for PaddleOCR-VL, and no page has more errors than before. What is left on page 38 is the inline math around
+`t≧10` and `t=` described above (10 errors for MiniCPM, 8 for PaddleOCR-VL) and 閣 read as 閤. The Judge's Score of
+MiniCPM's changed Block went from 0.79 to 0.92. Wall time did not change (373 s and 305 s).
 - **Dropped Blocks: none.** Neither Reader returned an empty Reading for a Block with text, and 1 text-layer
   character lies in no Block (the layout model is shared). One footnote on page 52 loses its last phrase
   (`保額：新台幣10萬`) under both Readers although the Block's box covers it; the cause was not found.
@@ -359,7 +370,9 @@ Block sets differ (320 against 321 Blocks): a small difference, not a measured c
 
 - **Repetition cuts: 0** in every MiniCPM run on the 21 pages and on the brochure. The loop cut was therefore not
   exercised by this document (its tests use synthetic loops). **Script repairs on MiniCPM output: 0** (1 character
-  at 144 DPI); on PaddleOCR-VL output 16 characters.
+  at 144 DPI); on PaddleOCR-VL output 16 characters. Since issue #7 the repair also writes one `≥` as `≧` on page
+  38 for each Reader (`big5_symbols_changed`: 1), and `latex_symbols_unwrapped` is 1 for MiniCPM and 0 for
+  PaddleOCR-VL, which wrote that `≥` directly.
 - **Time.** The Judge adds 81 s to the 21 pages with MiniCPM (234 s to 315 s, 3.9 s per page) and 122 s with
   PaddleOCR-VL (188 s to 311 s, including its 46 re-reads). Default MiniCPM takes 375 to 389 s, about 18 s per page.
 - **GPU memory.** The whole card peaked at 9,453 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM without the
@@ -689,8 +702,8 @@ timeout, so a stuck worker cannot hang the run.
   these numbers do not carry over, and a scanned document was not measured at all. Re-check `--judge-threshold`
   on your own documents (`ocr_eval.py` needs a text layer; the JSON's `score` and `below_threshold` do not).
 - **On the measurement document MiniCPM, the default Reader, read fewer characters right than PaddleOCR-VL**
-  (35 against 19 wrong of 16,586), mostly rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) and inline
-  symbols written as LaTeX (`≧` as `$\geq$`). It needs about half the GPU memory when it reads alone and does not drift into Simplified
+  (27 against 18 wrong of 16,586 with the defaults), mostly rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) and
+  short inline math written as LaTeX around printed text (`$ t \geq 10 $` for `t≧10`). It needs about half the GPU memory when it reads alone and does not drift into Simplified
   characters. `--reader paddle` is a reasonable choice for a Traditional document where those characters matter.
 - **The Judge is a weak error detector.** At the default 0.5 it flags 14 % of the Blocks and about half of the
   Blocks with an error; a correct Reading often scores low (one-line product names, figure titles), and a re-read can
@@ -790,8 +803,9 @@ structure.
 
 `tests/baseline.json` holds the recorded baseline: the document (name, sha256, pages), the error rate measured for each
 Reader with its default options, and the bound the end-to-end test enforces (`minicpm` 0.25 %, `paddle` 0.20 %:
-the measured rate plus 0.05 percentage points, rounded up to the next 0.05). The measured rates are 0.199 % (33 of
-16,586 characters) for MiniCPM and 0.115 % (19) for PaddleOCR-VL. **This is not the original 21-page sample**, which
+the measured rate plus 0.05 percentage points, rounded up to the next 0.05). The measured rates, after issue #7, are
+0.163 % (27 of 16,586 characters) for MiniCPM and 0.109 % (18) for PaddleOCR-VL. The rule gives the same bounds as it
+did for the earlier 0.199 % and 0.115 %. **This is not the original 21-page sample**, which
 is not available; the numbers are not comparable with the 0.40 % in "Earlier tuning". To reproduce them:
 
 ```bash
