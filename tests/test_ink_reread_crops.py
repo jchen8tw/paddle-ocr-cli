@@ -98,7 +98,7 @@ class FakeBridge:
 
 
 def set_page(ink, page, img):
-    ink.set_page(page, img, SCALE)
+    ink.set_page(pdf_ocr.PageRenders(page, img, SCALE, DPI))
 
 
 def minicpm_run(monkeypatch, capped_to=None):

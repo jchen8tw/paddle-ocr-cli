@@ -462,29 +462,24 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
     differently scaled renders and keep the result only if it is clearly longer and plausible.
     (--reader paddle without the Judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
-    renders: dict[float, tuple] = {}
-    h_img, w_img = img.shape[:2]
+    renders = PageRenders(page, img, scale, args.dpi)
     for b in res["parsing_res_list"]:
         if b.label not in TEXT_LABELS:
             continue
-        x1, y1, x2, y2 = (int(v) for v in b.bbox)
-        crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
+        bbox = tuple(int(v) for v in b.bbox)
+        crop = renders.original(bbox)
         if crop.size == 0:
             continue
 
-        def reread_at_scale(factor, x1=x1, y1=y1, x2=x2, y2=y2):
-            if factor not in renders:
-                renders[factor] = render_page(page, args.dpi * factor)
-            img2, scale2 = renders[factor]
-            k, pad = scale2 / scale, 4
-            r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
+        def reread_at_scale(factor, bbox=bbox):
+            r = renders.region(bbox, factor)
             out = pipe.predict(r, use_layout_detection=False, prompt_label="ocr",
                                max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
 
         better = ink_reread_block(crop, b.content, reread_at_scale)
         if better is not None:
-            notes.append({"bbox": [x1, y1, x2, y2], "original": b.content})
+            notes.append({"bbox": list(bbox), "original": b.content})
             b.content = better
     return notes
 
@@ -501,17 +496,29 @@ class PageRenders:
         x1, y1, x2, y2 = bbox
         return self.img[max(y1, 0):y2, max(x1, 0):x2]
 
-    def crop(self, bbox, factor: float):
-        """The Block's box cut from the page rendered `factor` times larger, or None if the render could not be made
-        that much larger (the render size is capped)."""
+    def _render(self, factor: float):
+        """(the page rendered at `dpi * factor`, how many times larger than the page's own render that really is:
+        the render size is capped, so this can be less than `factor`)."""
         if factor not in self._renders:
             self._renders[factor] = render_page(self.page, self.dpi * factor)
         img2, scale2 = self._renders[factor]
-        k = scale2 / self.scale
+        return img2, scale2 / self.scale
+
+    def crop(self, bbox, factor: float):
+        """The Block's box cut from the page rendered `factor` times larger, or None if the render could not be made
+        that much larger (the render size is capped)."""
+        img2, k = self._render(factor)
         if abs(k - factor) > 0.01:
             return None
         x1, y1, x2, y2 = (round(v * k) for v in bbox)
         return img2[max(y1, 0):y2, max(x1, 0):x2]
+
+    def region(self, bbox, factor: float, pad: int = 4):
+        """The Block's box plus `pad` pixels of margin cut from the page rendered `factor` times larger (as large as
+        the cap allows), for the ink-based re-read of a short Block, which reads whatever it gets."""
+        img2, k = self._render(factor)
+        x1, y1, x2, y2 = bbox
+        return img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
 
 
 class InkReread:
@@ -519,29 +526,22 @@ class InkReread:
     the page it belongs to is set here before the pipeline runs. Re-reads go straight to the Reader."""
 
     def __init__(self):
-        self.page = None  # (pdf page, BGR render, px per pt, renders cache)
+        self.renders: PageRenders | None = None
 
-    def set_page(self, page, img, scale: float) -> None:
-        self.page = (page, img, scale, {})
+    def set_page(self, renders: PageRenders) -> None:
+        self.renders = renders
 
     def reread_with(self, bridge, args):
         def ink_reread(request, text):
-            if self.page is None or request.label not in TEXT_LABELS or request.bbox is None:
+            if self.renders is None or request.label not in TEXT_LABELS or request.bbox is None:
                 return None
-            page, img, scale, renders = self.page
-            h_img, w_img = img.shape[:2]
-            x1, y1, x2, y2 = request.bbox
-            crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
+            renders, bbox = self.renders, tuple(request.bbox)
+            crop = renders.original(bbox)
             if crop.size == 0:
                 return None
 
             def reread_at_scale(factor):
-                if factor not in renders:
-                    renders[factor] = render_page(page, args.dpi * factor)
-                img2, scale2 = renders[factor]
-                k, pad = scale2 / scale, 4
-                r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
-                return bridge.read_crop(r, "text", args.max_new_tokens).strip()
+                return bridge.read_crop(renders.region(bbox, factor), "text", args.max_new_tokens).strip()
 
             return ink_reread_block(crop, text, reread_at_scale)
 
@@ -989,7 +989,7 @@ def _transcribe(args, stack) -> int:
             if bridge is not None:
                 bridge.current_page = idx
                 bridge.page_source = PageRenders(page, img, scale, args.dpi)
-                ink.set_page(page, img, scale)
+                ink.set_page(bridge.page_source)
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             recovered = []
             if args.no_judge and not args.no_recover and not args.reader == "minicpm":
