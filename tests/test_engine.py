@@ -8,10 +8,9 @@ import types
 
 import numpy as np
 import pypdfium2 as pdfium
-import pytest
 
 import pdf_ocr
-from fakes import FakeClient, engine_with
+from fakes import engine_with
 from reader_bridge import BlockQuery
 
 TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"
