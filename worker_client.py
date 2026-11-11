@@ -37,6 +37,8 @@ def score_timeout(n_items: int) -> float:
 
 
 class WorkerClient:
+    quit_timeout = 5.0  # seconds close() waits for the quit request to be written before it kills the worker
+
     def __init__(self, cmd: list[str], *, env: dict | None = None, start_timeout: float = 600.0,
                  max_restarts: int = 3):
         self.cmd, self.env = list(cmd), env
@@ -96,11 +98,10 @@ class WorkerClient:
         if proc is None or proc.poll() is not None:
             return
         try:
-            proc.stdin.write(json.dumps({"op": "quit"}) + "\n")
-            proc.stdin.flush()
+            self._send(json.dumps({"op": "quit"}) + "\n", self.quit_timeout)
             proc.stdin.close()
             proc.wait(timeout=15)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
+        except (WorkerError, OSError, ValueError, subprocess.TimeoutExpired):
             self._kill()
 
     def _kill(self) -> None:

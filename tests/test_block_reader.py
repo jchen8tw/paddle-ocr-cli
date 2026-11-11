@@ -228,3 +228,13 @@ def test_inline_formulas_get_the_same_treatment_but_text_and_tables_are_shown_as
     read_blocks([req("a", "inline_formula"), req("b", "text"), req("c", "table")],
                 FakeReader({"a": " $  x  $", "b": "see  $  x  $  and  more", "c": "<td>a  b</td>"}), judge, settings())
     assert [i.text for i in judge.calls[0]] == ["$ x $", "see  $  x  $  and  more", "<td>a  b</td>"]
+
+
+def test_a_judge_that_answers_for_fewer_readings_than_asked_gives_every_reading_a_forward_error():
+    class ShortJudge(FakeJudge):
+        def score(self, items):
+            return super().score(items)[:-1]
+
+    out = read_blocks([req("a"), req("b")], FakeReader({"a": "x", "b": "y"}), ShortJudge(), settings())
+    assert [(o.verdict, o.score) for o in out] == [("forward_error", None)] * 2
+    assert "1 of 2" in out[0].verdict_detail
