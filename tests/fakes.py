@@ -107,7 +107,7 @@ def engine_with(tmp_path):
     crops.mkdir(parents=True, exist_ok=True)
     bridge = MiniCPMBridge(client, crops, to_html=lambda s: "", judge=True, judge_threshold=0.98,
                            repair=StickyScriptRepair(ScriptRepair()))
-    ready = {"judge": "fake-judge", "versions": {"torch": "0.0"}}
+    ready = {"judge": "MiniCPM-OCR-Jev", "versions": {"torch": "0.0"}}
     return pdf_ocr.Engine(FakePipe(bridge), "cpu", bridge, pdf_ocr.InkReread(), ready), client
 
 
