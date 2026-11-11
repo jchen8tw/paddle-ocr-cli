@@ -62,7 +62,7 @@ own fontconfig, is explained in "The Judge" below.
 
 Memory on a 12 GB GPU, measured with `nvidia-smi` (RTX 4070 Ti, 12,282 MiB, with about 2.4 GB used by the desktop
 and a game during the measurements; a four-page run of a "stand-in", a digital-born Traditional Chinese proposal PDF used before the measurement document was available. Whole-run peaks on the 21 measured
-pages are in "Tuning notes": 9,453 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM alone):
+pages are in "Tuning notes": 9,296 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM alone):
 
 | path | main process | worker | peak of the whole card |
 |---|---|---|---|
@@ -259,7 +259,7 @@ included.
 | MiniCPM, `--no-judge` | 195 (1.17 %) | 0.211 % (35) | 234 s | 5,408 MiB |
 | PaddleOCR-VL, Judge on (defaults, threshold 0.5) | 245 (1.47 %) | 0.115 % (19) | 311 s | 10,070 MiB |
 | MiniCPM, Judge on, nothing re-read (`--judge-threshold 0`) | 195 (1.17 %) | 0.211 % (35) | 315 s | 9,453 MiB |
-| **MiniCPM, Judge on (defaults, threshold 0.5)** | 193 (1.16 %) | **0.199 %** (33) | 389 s and 375 s (two runs) | 9,540 and 9,996 MiB |
+| **MiniCPM, Judge on (defaults, threshold 0.5)** | 193 (1.16 %) | **0.199 %** (33) | 340 s and 341 s (two runs) | 9,296 and 9,312 MiB |
 
 Per label (fixed harness), wrong characters, PaddleOCR-VL against MiniCPM without the Judge: text 9 against 21
 (of 3,256), footnotes 9 against 13 (of 1,771), tables 0 against 0 (of 10,588), titles, headers and page numbers 0
@@ -309,36 +309,48 @@ the first Reading. Of the 320 scored Blocks (the display formula excluded), 12 c
 
 ### Threshold calibration (MiniCPM, Judge on)
 
-321 judged Blocks. "Re-read" is the share of Blocks whose first Score was below the threshold; "still below" is the
-share still below it after up to 10 Readings (these are flagged `below_threshold`). The run without re-reading (0)
-is the time reference.
+321 judged Blocks. "Re-read" is the share of Blocks whose first Score was below the threshold. "Flagged" is the
+share with `flagged: true`, which here equals "re-read": every re-read Block is flagged, and every first Reading got
+a Score. The 0.5 row is two runs with the early stop of issue #9, which gave identical Markdown, CSVs and JSON. The
+rows above 0.5 were measured before the early stop, with every round run for every re-read Block, so their extra
+Readings, errors and times belong to the old schedule. Their flagged counts depend only on the first Readings, which
+the early stop does not change. The run without re-reading (0) is the time reference.
 
-| `--judge-threshold` | Blocks re-read | still below | extra Readings | strict errors | CER (errors) | wall | peak VRAM |
+| `--judge-threshold` | Blocks re-read | flagged | extra Readings | strict errors | CER (errors) | wall | peak VRAM |
 |---|---|---|---|---|---|---|---|
 | 0 (Scores only) | 0 | 0 | 0 | 195 | 0.211 % (35) | 315 s | 9,453 MiB |
-| **0.5 (new default)** | 44 (13.7 %) | 43 (13.4 %) | 396 | 193 | **0.199 % (33)** | 389 s (+23 %) | 9,540 MiB |
-| 0.7 | 72 (22.4 %) | 71 (22.1 %) | 648 | 195 | 0.199 % (33) | 473 s (+50 %) | 9,985 MiB |
+| **0.5 (new default)** | 44 (13.7 %) | 44 (13.7 %) | 68 | 193 | **0.199 % (33)** | 340 and 341 s (+8 %) | 9,296 and 9,312 MiB |
+| 0.7 | 72 (22.4 %) | 72 (22.4 %) | 648 | 195 | 0.199 % (33) | 473 s (+50 %) | 9,985 MiB |
 | 0.9 | 155 (48.3 %) | 155 (48.3 %) | 1,395 | 258 | 0.199 % (33) | 848 s (+169 %) | 10,406 MiB |
 | 0.95 | 240 (74.8 %) | 240 (74.8 %) | 2,160 | 263 | 0.199 % (33) | 965 s (+206 %) | 10,089 MiB |
 | 0.98 (the Judge authors' value, the old default) | 267 (83.2 %) | 267 (83.2 %) | 2,403 | 263 | 0.199 % (33) | 1,090 s (+246 %) | 10,277 MiB |
 
-What re-reading did, in full: of the 44 Blocks read again at 0.5, **two changed**. The 鑽→鑛 misread became right
-(2 errors fewer; Score 0.08 to 0.28, still below 0.5, so still flagged). The 躉→薈 misread became 躉→薑: still wrong,
-but scored **0.87**, so it passed and **lost its flag**. A re-read can replace a flagged wrong Reading with an
-unflagged wrong one. At 0.7 one more Block changed, only in the kind of dash; from 0.9 up at least 11 more
-did, which is the whole difference of the strict column. No threshold changed more than those 2 characters,
-no Block ever reached 0.98 (`exhausted` for every Block still below), and at 0.98 the 2,403 extra Readings
+What re-reading did at 0.5. Round 2 (the 1.25x render) read a new text for 4 of the 44 re-read Blocks, and the
+other 40 stopped there with `no_new_text`. Of those 4, two stopped after round 3 and two ran round 4, so the 44
+Blocks cost 68 extra Readings, 7 of them new texts. **Two Blocks changed.** The 鑽→鑛 misread became right in
+round 2 (2 errors fewer; Score 0.08 to 0.28, flagged), and the other change was spacing only (`35歲` read as
+`35 歲`). The 躉→薈 misread (Score 0.05) stays, and stays flagged. Before the early stop, rounds 3 and 4 made 352
+Readings with 7 new texts and fixed nothing. One of them was a temperature-0.7 sample that turned 躉→薈 into
+躉→薑, still wrong but scored **0.87**, which then cleared the flag. That sample is no longer drawn, and a Reading
+like it would no longer clear the flag. The rest of this paragraph is from the old schedule. At 0.7 one more Block
+changed, only in the kind of dash; from 0.9 up at least 11 more did, which is the whole difference of the strict
+column. No threshold changed more than those 2 characters, no Block ever reached 0.98 (`exhausted` for every Block still below), and at 0.98 the 2,403 extra Readings
 contained only 38 texts that had not been read before.
 
 The default is **0.5**: the lowest value tried (other than 0) and the cheapest one at which re-reading fixed anything
-(+23 % time, 14 % of Blocks flagged); every higher value made the same fix at a higher cost. That is not a strong calibration: it rests on one fixed Block, and
+(+8 % time with the early stop, 14 % of Blocks flagged); every higher value made the same fix at a higher cost
+(measured before the early stop). That is not a strong calibration: it rests on one fixed Block, and
 with 12 wrong Blocks another pick would be as defensible. The Judge authors' 0.98 is not an option on this evidence:
-it re-reads and flags 83 % of the Blocks and takes 3.5 times as long for nothing more. The flag is a weak review
-queue: at 0.5 it holds 6 of the 12 wrong Blocks among 44 Blocks (14 %); at 0.9, 11 of 12 among 154 (48 %); at 0.95
-and above all 12, among 75 to 83 % of all Blocks. For PaddleOCR-VL (only the 1.25x round can run) the default
-re-read 46 Blocks (14 %) and none changed: 46 extra Readings, all `exhausted`, the same 19 errors.
+it re-reads and flags 83 % of the Blocks, and before the early stop it took 3.5 times as long for nothing more. The
+flag is a weak review queue: at 0.5 it holds 6 of the 12 Blocks whose first Reading was wrong, among 44 Blocks
+(14 %); at 0.9, 11 of 12 among 154 (48 %); at 0.95 and above all 12, among 75 to 83 % of all Blocks. For PaddleOCR-VL (only the 1.25x round can run) the default
+re-read 46 Blocks (14 %) and none changed: 46 extra Readings and the same 19 errors. The 1.25x round repeated the
+first text for all 46, so with the early stop they end `no_new_text` (they were measured before it, as `exhausted`).
+The Readings are the same either way.
 
 ### Render DPI
+
+Both rows were measured before the early stop of issue #9, so their wall times include the full schedule.
 
 | `--dpi` | CER (errors) | Blocks re-read at 0.5 | Simplified repairs | wall | peak VRAM |
 |---|---|---|---|---|---|
@@ -356,8 +368,8 @@ Block sets differ (320 against 321 Blocks): a small difference, not a measured c
   exercised by this document (its tests use synthetic loops). **Script repairs on MiniCPM output: 0** (1 character
   at 144 DPI); on PaddleOCR-VL output 16 characters.
 - **Time.** The Judge adds 81 s to the 21 pages with MiniCPM (234 s to 315 s, 3.9 s per page) and 122 s with
-  PaddleOCR-VL (188 s to 311 s, including its 46 re-reads). Default MiniCPM takes 375 to 389 s, about 18 s per page.
-- **GPU memory.** The whole card peaked at 9,453 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM without the
+  PaddleOCR-VL (188 s to 311 s, including its 46 re-reads). Default MiniCPM takes 340 to 341 s, about 16 s per page.
+- **GPU memory.** The whole card peaked at 9,296 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM without the
   Judge and 9,657 MiB for PaddleOCR-VL without it. No run hit a Reader or Judge memory error. The higher
   thresholds peaked a little higher, probably from 4-sample rounds on tables (not checked).
 
@@ -512,7 +524,7 @@ again, up to nine more times, and the best Reading is kept (next section).
   reason. A failure on one Block never stops the run: the Reading is kept and the failure recorded. A page whose
   Judge call fails entirely gets `forward_error` on all its judged Blocks.
 - **On stderr**, each page's line says how many of its judged Blocks are flagged and how many were re-read,
-  e.g. `[  2/21] page 39: 23 blocks, 20.6s, 4 of 23 judged flagged, 4 re-read` (measurement document,
+  e.g. `[  2/21] page 39: 23 blocks, 14.3s, 4 of 23 judged flagged, 4 re-read` (measurement document,
   threshold 0.5), with the number not scored in brackets when there are some. The Markdown contains no Scores or markers.
 - **Scores are per page.** The JSON is built before the cross-page table merge, so a Score never covers only half
   of a merged table.
@@ -614,15 +626,15 @@ before it read a text not read before:
   A sampled round costs one worker request per Block (4 samples decoded together, with only the last position's
   logits computed at prefill, which keeps a 4-sample table read inside the card's memory next to the Judge).
 - **Cost, measured on the measurement document** (pages 38-58, 321 judged Blocks, MiniCPM Reader, RTX 4070 Ti; the
-  table is in "Tuning notes"). At the old default of 0.98, 267 of the 321 Blocks (83 %) were re-read and none reached
+  table is in "Tuning notes"). At the old default of 0.98 (measured before the early stop), 267 of the 321 Blocks (83 %) were re-read and none reached
   0.98; the run took 1,090 s against 315 s when nothing is re-read (`--judge-threshold 0`), 3.5 times as long, and
   the error rate was the same as at 0.5. The 2,403 extra Readings contained 38 texts not read before. **At the
-  default of 0.5, 44 Blocks (14 %) were re-read, the run took 389 s (+23 %), and two Blocks changed**, one for the
-  better and one to another wrong Reading with a high Score that cleared its flag. With the paddle Reader the
-  1.25x round gave the same text for all 46 re-read Blocks. The schedule, as specified, spends most of its time on
-  duplicates.
+  default of 0.5, 44 Blocks (14 %) were re-read, the run took 340 to 341 s (+8 %), and one Block changed for the
+  better** (one more changed only its spacing). Before the early stop the same run took 375 to 389 s (+23 %) and made
+  396 extra Readings with 11 new texts; with it, 68 with 7. With the paddle Reader the 1.25x round gave the same
+  text for all 46 re-read Blocks, which now end after that round.
 - **GPU memory.** With the Layout model, MiniCPM and Jev loaded, `nvidia-smi` (whole card, 1 s samples, about 1 GB of
-  it other desktop processes) peaked at 9,453 to 10,406 MiB of 12,282 MiB over the threshold runs on the measurement
+  it other desktop processes) peaked at 9,296 to 10,406 MiB of 12,282 MiB over the threshold runs on the measurement
   document (10,778 MiB on the brochure), and at 10,070 MiB for the paddle run. The tables in those runs were small (319 to 380 characters of HTML). On the largest table crop available (1369 x
   1091 px, 2561 prompt tokens, 239 generated tokens) the worker alone went from 8.2 GB (both models idle) to 9.8 GB
   while decoding 4 seeded samples at 0.7, and the second call with the same seed gave identical texts. **The worst
@@ -691,14 +703,14 @@ timeout, so a stuck worker cannot hang the run.
   replace a wrong Reading by another wrong one with a high Score (躉 became 薑 at 0.87), which is why a re-read never
   clears the flag. Treat `flagged` as a hint, not a verdict. Scores are only as comparable as the machine that made them.
 - The Judge adds three setup items (Chromium, `node`, Noto Sans CJK) and, with MiniCPM, 3.9 s per page; with the
-  default threshold the re-reads add about 23 % more run time (375 to 389 s against 315 s for the 21 pages). At the
-  authors' 0.98 most Blocks are re-read and the run takes 3.5 times as long. `--no-judge` avoids all of it
+  default threshold the re-reads add about 8 % more run time (340 to 341 s against 315 s for the 21 pages). At the
+  authors' 0.98 most Blocks are re-read, and before the early stop the run took 3.5 times as long. `--no-judge` avoids all of it
   (234 s); `--judge-threshold 0` keeps the Scores and turns the re-reading off.
 - `--reader minicpm` and the Judge need the worker environment (`uv sync --project worker`) and a CUDA GPU. The worker's
   torch wheel targets CUDA 13.2; a driver that supports only CUDA 13.0 needs a different torch index in
   `worker/pyproject.toml`. This was not tested.
-- A page of a table-heavy PDF takes about 18 s with the defaults (MiniCPM, Judge on) on an RTX 4070 Ti (12 GB), and
-  the card peaked at 9,540 to 10,000 MiB (about 1,000 MiB of it the desktop) on the measurement document, 10,778 MiB
+- A page of a table-heavy PDF takes about 16 s with the defaults (MiniCPM, Judge on) on an RTX 4070 Ti (12 GB), and
+  the card peaked at 9,296 to 9,312 MiB (about 1,000 MiB of it the desktop) on the measurement document, 10,778 MiB
   on a four-page brochure. The worst case, a table of 8,192 tokens read as 4 samples next to the Judge, was not run.
 - **Paddle-only (original sample, `--reader paddle`):** about 94 of the 23,390 characters in the original sample were
   still wrong with PaddleOCR-VL, all model errors: a repeated 腫→腗 misread in the ICD tables, a few small blocks the
