@@ -15,22 +15,22 @@
       "argv": [],
       "settings": {"reader": "paddle", "judge": false, "judge_threshold": null, "reread_short_blocks": true, "dpi": 216.0},
       "cer_bound": 0.0020,
-      "measured": {"errors": 19, "ref_chars": 16586, "cer": 0.001146, "wall_seconds": 188, "peak_vram_mib": 9657,
-                   "source": "README 'Readers compared', run as --reader paddle --no-judge before #11"}
+      "measured": {"errors": 18, "ref_chars": 16586, "cer": 0.001085, "wall_seconds": 187, "peak_vram_mib": 9774,
+                   "source": "2026-11-11, after #7 and #11 (19 errors before #7, as --reader paddle --no-judge); wall_seconds as the CLI reports it"}
     },
     "minicpm-judge": {
       "argv": ["--reader", "minicpm", "--judge"],
       "settings": {"reader": "minicpm", "judge": true, "judge_threshold": 0.5, "reread_short_blocks": false, "dpi": 216.0},
       "cer_bound": 0.0025,
-      "measured": {"errors": 33, "ref_chars": 16586, "cer": 0.001990, "wall_seconds": 389, "peak_vram_mib": 9540,
-                   "source": "2026-11-11"}
+      "measured": {"errors": 27, "ref_chars": 16586, "cer": 0.001628, "wall_seconds": 373, "peak_vram_mib": 9540,
+                   "source": "2026-11-11, after #7 (33 errors before it); peak_vram_mib from before #7"}
     },
     "paddle-judge": {
       "argv": ["--reader", "paddle", "--judge"],
       "settings": {"reader": "paddle", "judge": true, "judge_threshold": 0.5, "reread_short_blocks": false, "dpi": 216.0},
       "cer_bound": 0.0020,
-      "measured": {"errors": 19, "ref_chars": 16586, "cer": 0.001146, "wall_seconds": 311, "peak_vram_mib": 10070,
-                   "source": "2026-11-11"}
+      "measured": {"errors": 18, "ref_chars": 16586, "cer": 0.001085, "wall_seconds": 305, "peak_vram_mib": 10070,
+                   "source": "2026-11-11, after #7 (19 errors before it); peak_vram_mib from before #7"}
     }
   },
   "reproduce": "PDF_OCR_SAMPLE_PDF=\"/path/to/台灣人壽解約金 115.09.23.pdf\" uv run pytest -m gpu tests/test_e2e.py   # or, for one configuration: uv run pdf_ocr.py \"<pdf>\" -o out --pages 38-58 <its argv> && uv run ocr_eval.py \"<pdf>\" out/<stem>.json"

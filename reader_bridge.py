@@ -316,10 +316,10 @@ class ReaderBridge:
     """The pipeline's `vl_rec_model`: reads a page's Blocks with a Reader, and (with `judge`) scores them.
 
     All the work is block_reader.read_blocks; this class is the glue to the pipeline and the worker. Each
-    Reading is cleaned here (repetition cut, math delimiters, OTSL to HTML, table line breaks) so the
-    pipeline's own post-processing, which repeats those steps, finds nothing left to do, and the Judge
-    scores exactly the text that is written. `outcomes` maps (page index, bbox) to the Block's BlockResult;
-    set `current_page` before each `pipe.predict`.
+    Reading is cleaned here (repetition cut, math delimiters, lone symbols, OTSL to HTML, table line breaks), so
+    the pipeline's own post-processing finds nothing left to do and the Judge scores exactly the text that is
+    written. `outcomes` maps (page index, bbox) to the Block's BlockResult; set `current_page` before each
+    `pipe.predict`.
     """
 
     batch_sampler = types.SimpleNamespace(batch_size=1)  # only read when the pipeline uses queues
@@ -331,6 +331,7 @@ class ReaderBridge:
         self.judge, self.threshold, self.repair, self.ink_reread = judge, judge_threshold, repair, ink_reread
         self.doc_hash = doc_hash  # with the page and the Block, what the sampling seeds of the re-read rounds are made of
         self.repetition_cuts = 0
+        self.symbols_unwrapped = 0
         self.current_page = 0
         self.scale_sources: dict[str, int] = collections.Counter()  # scaled images made, by where they came from
         self.page_source = None  # set per page by the caller: lets round 2 re-render the page (see BlockScaler)
@@ -340,9 +341,10 @@ class ReaderBridge:
         raise NotImplementedError
 
     def _clean(self, raw: str, label: str) -> str:
-        text, cut = minicpm_reader.clean_reading(raw, label, to_html=self.to_html, strip=self.strip)
-        self.repetition_cuts += cut
-        return text
+        cleaned = minicpm_reader.clean_reading(raw, label, to_html=self.to_html, strip=self.strip)
+        self.repetition_cuts += cleaned.repetition_cut
+        self.symbols_unwrapped += cleaned.symbols_unwrapped
+        return cleaned.text
 
     def predict(self, inputs, **kwargs):
         inputs = list(inputs)

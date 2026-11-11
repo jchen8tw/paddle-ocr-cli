@@ -8,8 +8,8 @@
 
 Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks -> the Reader
 (PaddleOCR-VL-1.6, or MiniCPM-OCR-1.0 in the torch worker) recognises every block (text / table /
-formula; charts and seals on request) -> block-level clean-up (Simplified/Traditional repair,
-truncated-block re-read) -> JSON per page, and Markdown with cross-page tables merged and title
+formula; charts and seals on request) -> block-level clean-up (lone LaTeX symbols, Simplified/Traditional
+repair, truncated-block re-read) -> JSON per page, and Markdown with cross-page tables merged and title
 levels fixed, plus one CSV per well-formed table.
 """
 from __future__ import annotations
@@ -30,7 +30,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import block_reader
-from script_repair import NO_REPAIR_LABELS, ScriptRepair, is_traditional
+from minicpm_reader import unwrap_symbols
+from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
 
 ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
@@ -166,7 +167,8 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
 # --------------------------------------------------------------------------- script repair
 
 def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, dict]:
-    """Fix Simplified drift in the block objects of `results` in place.
+    """Fix Simplified drift, and write `≥`/`≤` as the Big5 glyphs `≧`/`≦`, in the block objects of `results` in
+    place, once the whole document is decided Traditional (ScriptRepair.fix).
 
     Returns (summary for the JSON, {(page_idx, block_idx): original_text} for changed blocks).
     """
@@ -189,14 +191,15 @@ def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, d
     is_trad = is_traditional(simp, trad)
     info.update(simplified_chars=simp, traditional_chars=trad,
                 document_script="traditional" if is_trad else "not traditional")
-    if not is_trad or simp == 0:
+    if not is_trad:
         return info, raw
     for idx, i, b in blocks:
         fixed = rep.fix(b.content)
         if fixed != b.content:
             raw[(idx, i)] = b.content
             b.content = fixed
-    info.update(applied=True, blocks_changed=len(raw))
+    info.update(applied=True, blocks_changed=len(raw),
+                big5_symbols_changed=sum(text.count(c) for text in raw.values() for c in BIG5_LOOKALIKES))
     return info, raw
 
 
@@ -576,6 +579,22 @@ def fix_table_line_breaks(results: list[tuple[int, object]]) -> int:
                 b.content = b.content.replace("\\n", "<br>")
                 fixed += 1
     return fixed
+
+
+def unwrap_block_symbols(results: list[tuple[int, object]]) -> int:
+    """Write the lone LaTeX symbols of every Block as their character (minicpm_reader.unwrap_symbols); returns how
+    many were written. Like fix_table_line_breaks, this is the clean-up step the pipeline's own post-processing
+    lacks: without a bridge (PaddleOCR-VL without --judge, the default) the Readings only get it here, re-reads
+    included. A bridge
+    has already unwrapped its text, so with one this finds nothing."""
+    written = 0
+    for _, r in results:
+        for b in r["parsing_res_list"]:
+            text, n = unwrap_symbols(b.content, b.label)
+            if n:
+                b.content = text
+                written += n
+    return written
 
 
 def contiguous_groups(results: list[tuple[int, object]]):
@@ -1049,6 +1068,7 @@ def _transcribe(args, stack) -> int:
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
     undo_sticky_repair(ok, outcomes)  # the document-level repair below decides alone, as it always did
     tables_fixed = fix_table_line_breaks(ok)
+    unwrapped = unwrap_block_symbols(ok)
     script_info, raw = repair_script(ok, args.script)
     pages = {idx: page_json(idx, r, meta[idx], raw, args.md_ignore_labels, outcomes) for idx, r in ok}
 
@@ -1088,6 +1108,7 @@ def _transcribe(args, stack) -> int:
         "postprocessing": {
             "tables_with_line_breaks_fixed": tables_fixed,
             **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
+            "latex_symbols_unwrapped": unwrapped + (bridge.symbols_unwrapped if bridge else 0),
             "script_repair": script_info,
             **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
                if bridge and args.judge else {}),

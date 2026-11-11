@@ -37,7 +37,7 @@ def test_output_structure(config_runs, config, sample_pdf):
     assert doc["engine"]["reader"] == pdf_ocr.READER_MODEL_DIRS[options.reader]
     assert ("judge" in doc["engine"]) == options.judge
     assert ("torch" in doc["engine"]) == pdf_ocr.needs_worker(options)
-    assert {"tables_with_line_breaks_fixed", "script_repair"} <= doc["postprocessing"].keys()
+    assert {"tables_with_line_breaks_fixed", "latex_symbols_unwrapped", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []
     assert len(doc["pages"]) == len(doc["source"]["pages_processed"]) > 0
@@ -122,6 +122,7 @@ def test_a_reader_without_judge_gives_no_scores_and_records_that_the_judge_was_o
     assert doc["settings"]["judge"] is False and doc["settings"]["judge_threshold"] is None
     assert doc["settings"]["reread_short_blocks"] is True  # the ink-based re-read runs instead
     assert "judge" not in doc["engine"] and "judge" not in doc["postprocessing"]
+    assert "latex_symbols_unwrapped" in doc["postprocessing"]  # for --reader paddle, counted without a bridge
     assert doc["source"]["pages_failed"] == []
     for page in doc["pages"]:
         for b in page["blocks"]:
