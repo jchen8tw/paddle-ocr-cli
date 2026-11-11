@@ -401,12 +401,12 @@ class ReaderBridge:
             return None
 
     def page_summary(self, page: int) -> dict:
-        """How many Blocks of a page were judged, how many were re-read, how many are (still) below the threshold,
-        how many could not be scored."""
+        """How many Blocks of a page were judged, how many were re-read, how many are flagged, how many could not
+        be scored."""
         judged = [o for (p, _), o in self.outcomes.items() if p == page and o.judged]
         return {"judged": len(judged),
                 "reread": sum(1 for o in judged if o.readings is not None),
-                "below_threshold": sum(1 for o in judged if o.below_threshold),
+                "flagged": sum(1 for o in judged if o.flagged),
                 "not_scored": sum(1 for o in judged if o.verdict != block_reader.SCORED)}
 
     def supports(self, step) -> bool:

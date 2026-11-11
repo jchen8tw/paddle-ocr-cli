@@ -90,7 +90,7 @@ def test_a_block_that_passes_on_the_first_reading_is_read_once_and_has_no_readin
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1] and len(judge.calls) == 1
     assert out.readings is None and out.stop_reason is None
-    assert (out.text, out.score, out.below_threshold) == (first(), 0.95, False)
+    assert (out.text, out.score, out.flagged) == (first(), 0.95, False)
 
 
 def test_it_stops_as_soon_as_a_reading_passes():
@@ -98,7 +98,7 @@ def test_it_stops_as_soon_as_a_reading_passes():
     judge = ScriptedJudge({"good": 0.97})
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1, 2]
-    assert (out.text, out.score, out.below_threshold, out.stop_reason) == ("good", 0.97, False, "passed")
+    assert (out.text, out.score, out.flagged, out.stop_reason) == ("good", 0.97, False, "passed")
     assert [r.text for r in out.readings] == [first(), "good"]
 
 
@@ -115,7 +115,7 @@ def test_a_block_below_the_threshold_goes_through_every_round_in_order_and_is_ex
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1, 2, 3, 4]
     assert len(out.readings) == 10  # 1 + 1 + 4 + 4, all distinct
-    assert out.stop_reason == "exhausted" and out.below_threshold is True
+    assert out.stop_reason == "exhausted" and out.flagged is True
     assert [(r.round, r.decode, r.temperature, r.scale) for r in out.readings] == (
         [(1, "greedy", None, 1.0), (2, "greedy", None, 1.25)] + [(3, "temperature", 0.3, 1.0)] * 4
         + [(4, "temperature", 0.7, 1.0)] * 4)
@@ -144,7 +144,7 @@ def test_the_highest_score_wins_over_the_most_recent_reading():
     judge = ScriptedJudge({first(): 0.4, "better": 0.8, "worse": 0.6, "worst": 0.2})
     out = read_block(req("a"), reader, judge, settings())
     assert (out.text, out.score, out.verdict) == ("better", 0.8, "scored")
-    assert out.below_threshold is True and out.stop_reason == "exhausted"
+    assert out.flagged is True and out.stop_reason == "exhausted"
 
 
 def test_a_tie_goes_to_the_earliest_reading():
@@ -158,7 +158,7 @@ def test_unscorable_verdicts_never_win_and_the_first_reading_is_kept_when_nothin
     reader = ScriptedReader({("a", 2): "x2", ("a", 3): ["x3"] * 4, ("a", 4): ["x4"] * 4})
     judge = ScriptedJudge({first(): ("render_error", None), "x2": bad, "x3": bad, "x4": ("missing_original_image", None)})
     out = read_block(req("a"), reader, judge, settings())
-    assert (out.text, out.score, out.verdict, out.below_threshold) == (first(), None, "render_error", True)
+    assert (out.text, out.score, out.verdict, out.flagged) == (first(), None, "render_error", True)
     assert out.stop_reason == "no_scored"
     assert len(out.readings) == 4  # one distinct text per round: x3 and x4 are four identical samples each
 
@@ -234,7 +234,7 @@ def test_a_judge_failure_mid_schedule_keeps_the_best_reading_so_far():
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1, 2, 3]
     assert (out.text, out.score, out.stop_reason) == ("second", 0.7, "judge_error")
-    assert out.below_threshold is True
+    assert out.flagged is True
     assert all(r.verdict == "forward_error" for r in out.readings if r.round == 3)
 
 

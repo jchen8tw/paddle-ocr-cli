@@ -172,7 +172,7 @@ class BlockResult:
     score: float | None = None                 # a real Score, only with verdict "scored"
     verdict: str | None = None                 # None for a Block that was not judged
     verdict_detail: str | None = None
-    below_threshold: bool | None = None        # None for a Block that was not judged
+    flagged: bool | None = None                # None for a Block that was not judged
     text_before_repair: str | None = None      # set when the sticky repair changed the Reading before judging
     judged_before_script_decision: bool = False  # judged before the document was known to be Traditional
     text_before_reread: str | None = None      # set when the ink-based re-read replaced the Reading
@@ -353,7 +353,7 @@ def _finish(block: _Block, settings: ReadSettings) -> None:
     result.text, result.text_before_repair = winner.text, winner.text_before_repair
     result.judged_before_script_decision = winner.judged_before_script_decision
     result.verdict, result.verdict_detail, result.score = winner.verdict, winner.detail, winner.score
-    result.below_threshold = not (best is not None and best.score >= settings.threshold)
+    result.flagged = not (best is not None and best.score >= settings.threshold)
     if not block.entered or block.produced == 1 and block.stop == ("passed", None):
         return  # not re-read: the first Reading's own verdict says it all
     stop = block.stop or ("exhausted" if best is not None else "no_scored", None)

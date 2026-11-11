@@ -137,7 +137,7 @@ def test_a_crop_that_cannot_be_written_for_the_judge_is_an_encode_error_not_a_fa
     b, _ = paddle(FakeClient(), tmp_path, {"OCR:": "words"})
     assert read_page(b, [degenerate]) == ["words"]
     out = b.outcomes[(0, (0, 0, 10, 10))]
-    assert (out.verdict, out.score, out.below_threshold) == ("encode_error", None, True)
+    assert (out.verdict, out.score, out.flagged) == ("encode_error", None, True)
 
 
 # ----------------------------------------------------------------------------- --reader paddle

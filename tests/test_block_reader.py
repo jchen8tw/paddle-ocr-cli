@@ -50,13 +50,13 @@ def settings(**kw):
 
 def test_a_scored_block_returns_its_reading_score_and_verdict():
     out = read_block(req("a"), FakeReader({"a": " hello "}), FakeJudge(default=("scored", 0.995)), settings())
-    assert (out.text, out.verdict, out.score, out.below_threshold) == ("hello", "scored", 0.995, False)
+    assert (out.text, out.verdict, out.score, out.flagged) == ("hello", "scored", 0.995, False)
 
 
 def test_a_score_below_the_threshold_flags_the_block_and_the_threshold_is_the_setting():
     judge = FakeJudge(default=("scored", 0.90))
-    assert read_block(req("a"), FakeReader({"a": "x"}), judge, settings(threshold=0.98)).below_threshold is True
-    assert read_block(req("a"), FakeReader({"a": "x"}), judge, settings(threshold=0.85)).below_threshold is False
+    assert read_block(req("a"), FakeReader({"a": "x"}), judge, settings(threshold=0.98)).flagged is True
+    assert read_block(req("a"), FakeReader({"a": "x"}), judge, settings(threshold=0.85)).flagged is False
 
 
 @pytest.mark.parametrize("label,category", [
@@ -82,7 +82,7 @@ def test_unjudged_labels_are_read_but_never_shown_to_the_judge_and_carry_no_scor
     out = read_blocks([req("c", "chart"), req("t")], FakeReader({"c": "| a |", "t": "words"}), judge, settings())
     assert [i.key for i in judge.calls[0]] == ["t"]
     chart = out[0]
-    assert (chart.text, chart.score, chart.verdict, chart.below_threshold, chart.judged) == ("| a |", None, None, None, False)
+    assert (chart.text, chart.score, chart.verdict, chart.flagged, chart.judged) == ("| a |", None, None, None, False)
 
 
 def test_a_page_of_blocks_is_one_read_and_one_judge_call():
@@ -146,8 +146,8 @@ def test_the_repair_state_carries_over_from_one_page_to_the_next():
 def test_a_failure_verdict_is_recorded_without_a_score_the_block_is_flagged_and_the_text_is_kept(verdict):
     judge = FakeJudge(scores={"bad": (verdict, None)})
     out = read_blocks([req("a"), req("b")], FakeReader({"a": "bad", "b": "good"}), judge, settings())
-    assert (out[0].text, out[0].score, out[0].verdict, out[0].below_threshold) == ("bad", None, verdict, True)
-    assert (out[1].verdict, out[1].below_threshold) == ("scored", False)
+    assert (out[0].text, out[0].score, out[0].verdict, out[0].flagged) == ("bad", None, verdict, True)
+    assert (out[1].verdict, out[1].flagged) == ("scored", False)
 
 
 def test_a_sentinel_zero_from_the_judge_is_never_taken_for_a_score():
@@ -161,7 +161,7 @@ def test_a_judge_that_fails_outright_marks_every_judged_block_forward_error_and_
     out = read_blocks([req("a"), req("c", "chart"), req("b")], FakeReader({"a": "1", "c": "2", "b": "3"}), judge, settings())
     assert [o.verdict for o in out] == ["forward_error", None, "forward_error"]
     assert [o.text for o in out] == ["1", "2", "3"]
-    assert all(o.below_threshold for o in (out[0], out[2]))
+    assert all(o.flagged for o in (out[0], out[2]))
     assert "the worker stopped" in out[0].verdict_detail
 
 
@@ -187,7 +187,7 @@ def test_a_reader_failure_is_not_swallowed_the_page_fails():
 
 def test_without_a_judge_there_are_no_scores_and_no_flags():
     out = read_block(req("a"), FakeReader({"a": "x"}), None, settings())
-    assert (out.text, out.score, out.verdict, out.below_threshold, out.judged) == ("x", None, None, None, False)
+    assert (out.text, out.score, out.verdict, out.flagged, out.judged) == ("x", None, None, None, False)
 
 
 def test_without_a_judge_the_ink_reread_may_replace_a_short_reading():

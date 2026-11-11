@@ -37,7 +37,7 @@ def test_every_judged_block_gets_a_score_verdict_and_flag_keyed_by_page_and_bbox
     b = minicpm(client, tmp_path)
     assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4))], page=4) == ["words"]  # re-reads scored lower
     out = b.outcomes[(4, (1, 2, 3, 4))]
-    assert (out.score, out.verdict, out.below_threshold) == (0.9, "scored", True)
+    assert (out.score, out.verdict, out.flagged) == (0.9, "scored", True)
 
 
 def test_the_judge_gets_the_cleaned_text_the_pipeline_will_write_and_a_crop_that_exists(tmp_path):
@@ -89,7 +89,7 @@ def test_a_worker_that_fails_to_score_is_a_forward_error_not_a_failed_page(tmp_p
     b = minicpm(client, tmp_path)
     assert read_page(b, [item("OCR:", "text")]) == ["words"]
     out = b.outcomes[(0, (0, 0, 10, 10))]
-    assert (out.verdict, out.score, out.below_threshold) == ("forward_error", None, True)
+    assert (out.verdict, out.score, out.flagged) == ("forward_error", None, True)
     assert "exited with code 3" in out.verdict_detail
 
 
@@ -100,15 +100,15 @@ def test_without_a_judge_nothing_is_scored_and_the_worker_is_only_asked_to_read(
     assert client.score_calls == [] and not b.outcomes[(0, (0, 0, 10, 10))].judged
 
 
-def test_the_page_summary_counts_blocks_below_the_threshold_and_those_not_scored(tmp_path):
+def test_the_page_summary_counts_flagged_blocks_and_those_not_scored(tmp_path):
     client = FakeClient({"Text Recognition:": "words"}, scores={"words": ("scored", 0.5)}, default_score=0.5)
     b = minicpm(client, tmp_path)
     read_page(b, [item("OCR:", "text", (0, 0, 1, 1)), item("OCR:", "text", (0, 2, 1, 3))], page=2)
     client.scores, client.default_score = {}, 0.99
     read_page(b, [item("OCR:", "text", (5, 5, 6, 6))], page=3)
-    assert b.page_summary(2) == {"judged": 2, "reread": 2, "below_threshold": 2, "not_scored": 0}
-    assert b.page_summary(3) == {"judged": 1, "reread": 0, "below_threshold": 0, "not_scored": 0}
-    assert b.page_summary(9) == {"judged": 0, "reread": 0, "below_threshold": 0, "not_scored": 0}
+    assert b.page_summary(2) == {"judged": 2, "reread": 2, "flagged": 2, "not_scored": 0}
+    assert b.page_summary(3) == {"judged": 1, "reread": 0, "flagged": 0, "not_scored": 0}
+    assert b.page_summary(9) == {"judged": 0, "reread": 0, "flagged": 0, "not_scored": 0}
 
 
 # --- --reader paddle: PaddleOCR-VL reads, the worker only judges ---------------------------------------
@@ -242,7 +242,7 @@ def test_with_paddle_a_worker_that_cannot_be_restarted_gives_forward_errors_not_
     b, _ = paddle(Dead(), tmp_path, {"OCR:": "words"})
     assert read_page(b, [item("OCR:", "text")]) == ["words"]
     out = b.outcomes[(0, (0, 0, 10, 10))]
-    assert (out.verdict, out.score, out.below_threshold) == ("forward_error", None, True)
+    assert (out.verdict, out.score, out.flagged) == ("forward_error", None, True)
     assert "not restarting" in out.verdict_detail
 
 
