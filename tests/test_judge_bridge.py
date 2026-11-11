@@ -195,6 +195,21 @@ def test_without_a_judge_the_ink_reread_gets_the_block_with_its_bbox_and_may_rep
     assert b.outcomes[(0, (3, 4, 5, 6))].text_before_reread == "x"
 
 
+def test_an_ink_reread_that_fails_keeps_the_first_reading_warns_and_does_not_fail_the_page(tmp_path, capsys):
+    class FailsOnSecondRead(FakeClient):
+        def read(self, image, prompt, max_new_tokens, **kw):
+            if len(self.calls) >= 2:  # the two first Readings succeed, the re-reads do not
+                raise WorkerError("worker error: CUDA out of memory")
+            return super().read(image, prompt, max_new_tokens, **kw)
+
+    b = minicpm(FailsOnSecondRead({"Text Recognition:": "short"}), tmp_path, judge=False)
+    b.ink_reread = lambda request, text: b.read_crop(request.image, "text")
+    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4)), item("OCR:", "text", (5, 6, 7, 8))]) == ["short", "short"]
+    err = capsys.readouterr().err
+    assert "keeping its first reading" in err and "out of memory" in err and "(5, 6, 7, 8)" in err
+    assert b.outcomes[(0, (5, 6, 7, 8))].text_before_reread is None
+
+
 def test_with_a_judge_the_ink_reread_is_not_called(tmp_path):
     def ink(request, text):
         raise AssertionError("must not run")

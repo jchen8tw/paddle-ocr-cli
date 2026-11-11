@@ -370,7 +370,7 @@ class ReaderBridge:
                     scaler=BlockScaler(inp["image"], bbox, self.page_source, self.scale_sources)))
             settings = block_reader.ReadSettings(
                 self.threshold, self._clean, self.repair if self.judge else None,
-                (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None,
+                self._best_effort_ink_reread if self.ink_reread and not self.judge else None,
                 doc_hash=self.doc_hash, page=self.current_page)
             judge = (_DownJudge(judge_down) if judge_down else WorkerJudge(self.client, crops)) if self.judge else None
             results = block_reader.read_blocks(requests, self._reader(kwargs, crops), judge, settings)
@@ -382,6 +382,16 @@ class ReaderBridge:
             yield {"result": result.text}
 
     uses_worker_reader = False
+
+    def _best_effort_ink_reread(self, request, text):
+        """The ink-based re-read is an improvement attempt: when it fails (the worker ran out of memory or timed out,
+        a crop cannot be prepared) the Block keeps its first Reading and the page goes on."""
+        try:
+            return self.ink_reread(request, text)
+        except Exception as e:
+            print(f"warning: page {self.current_page + 1}: the re-read of block {request.bbox} failed, "
+                  f"keeping its first reading: {type(e).__name__}: {e}", file=sys.stderr)
+            return None
 
     def page_summary(self, page: int) -> dict:
         """How many Blocks of a page were judged, how many were re-read, how many are (still) below the threshold,
