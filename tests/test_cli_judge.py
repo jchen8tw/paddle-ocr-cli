@@ -18,6 +18,18 @@ def test_the_judge_is_on_by_default_with_the_official_threshold():
     assert args("--judge-threshold", "0.9").judge_threshold == 0.9
 
 
+@pytest.mark.parametrize("bad", ["nan", "-0.1", "1.5", "inf", "abc"])
+def test_a_judge_threshold_outside_0_to_1_is_rejected_at_parse_time(bad, capsys):
+    with pytest.raises(SystemExit):
+        args("--judge-threshold", bad)
+    assert "--judge-threshold" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("ok", ["0", "1", "0.5"])
+def test_the_ends_of_the_judge_threshold_range_are_accepted(ok):
+    assert args("--judge-threshold", ok).judge_threshold == float(ok)
+
+
 def test_the_judge_needs_its_model_folder_unless_it_is_off(tmp_path):
     assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
     assert pdf_ocr.required_model_dirs(args("--no-judge")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
@@ -250,3 +262,12 @@ def test_other_failures_give_no_memory_hint():
     other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
     assert pdf_ocr.memory_hint({1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
     assert pdf_ocr.memory_hint({}, {}) is None
+
+
+def test_judged_blocks_without_an_outcome_are_found_by_page_and_box():
+    block = lambda label, bbox: types.SimpleNamespace(label=label, bbox=bbox)  # noqa: E731
+    res = {"parsing_res_list": [block("text", [1, 2, 3, 4]), block("text", [5, 6, 7, 8]), block("chart", [9, 9, 9, 9]),
+                                block("table", [0.4, 0.6, 20.2, 30.9])]}
+    outcomes = {(2, (1, 2, 3, 4)): outcome(judged=True)}
+    assert pdf_ocr.blocks_without_outcome(2, res, outcomes) == [("text", (5, 6, 7, 8)), ("table", (0, 0, 20, 30))]
+    assert len(pdf_ocr.blocks_without_outcome(3, res, outcomes)) == 3  # another page's outcomes do not count

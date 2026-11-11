@@ -115,6 +115,31 @@ def test_a_worker_error_in_a_sampled_round_keeps_the_best_reading_and_does_not_f
     assert out.score == 0.5
 
 
+def test_a_non_worker_error_while_preparing_a_re_read_image_keeps_the_first_reading_and_does_not_fail_the_page(tmp_path):
+    class BrokenRender:
+        def original(self, bbox):
+            return np.full((8, 16, 3), 255, np.uint8)
+
+        def crop(self, bbox, factor):
+            raise cv2.error("the re-render of the page failed")
+
+    b = minicpm(FakeClient(default_score=0.5), tmp_path)
+    b.page_source = BrokenRender()
+    assert read_page(b, [item("OCR:", "text"), item("Table Recognition:", "table", (20, 20, 30, 30), 1)]) == [
+        "text for Text Recognition:", "text for Table Recognition:"]
+    out = b.outcomes[(0, (0, 0, 10, 10))]
+    assert out.stop_reason == "reader_error" and "re-render" in out.stop_detail
+    assert out.score == 0.5
+
+
+def test_a_crop_that_cannot_be_written_for_the_judge_is_an_encode_error_not_a_failed_page(tmp_path):
+    degenerate = {"image": np.zeros((0, 0, 3), np.uint8), "query": item("OCR:", "text")["query"]}
+    b, _ = paddle(FakeClient(), tmp_path, {"OCR:": "words"})
+    assert read_page(b, [degenerate]) == ["words"]
+    out = b.outcomes[(0, (0, 0, 10, 10))]
+    assert (out.verdict, out.score, out.below_threshold) == ("encode_error", None, True)
+
+
 # ----------------------------------------------------------------------------- --reader paddle
 
 class FakePaddle:

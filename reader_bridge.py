@@ -165,8 +165,8 @@ class WorkerJudge:
             try:
                 payload.append((k, {"key": item.key, "image": str(self.crops.path(item.image_key or item.key, item.image)),
                                     "text": item.text, "category": item.category}))
-            except OSError as e:
-                results[k] = JudgeVerdict("encode_error", None, str(e))
+            except Exception as e:  # OSError, or cv2.error on a degenerate crop: this Reading only, not the page's batch
+                results[k] = JudgeVerdict("encode_error", None, f"{type(e).__name__}: {e}")
         if payload:
             answers = self.client.score([p for _, p in payload])
             if len(answers) != len(payload):
@@ -250,8 +250,9 @@ SAMPLE_TOP_P = 0.8
 
 
 class _MiniCPMRead:
-    """MiniCPM-OCR-1.0 in the worker: every round of the schedule. A failure in a re-read round is returned for that
-    Block (the Block keeps its best Reading so far); in round 1 it propagates and fails the page."""
+    """MiniCPM-OCR-1.0 in the worker: every round of the schedule. A failure in a re-read round (the worker's, or
+    preparing the image) is returned for that Block (the Block keeps its best Reading so far); in round 1 it
+    propagates and fails the page."""
 
     def __init__(self, client, crops: CropFiles | None, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
@@ -269,7 +270,7 @@ class _MiniCPMRead:
             try:
                 path = self.crops.path(r.key if step.scale == 1.0 else f"{r.key}@{step.scale:g}", block_image(r, step.scale))
                 answers.append([x["text"] for x in self.client.read(path, prompt, limit, decode=decode)])
-            except WorkerError as e:
+            except Exception as e:  # WorkerError, or a failure preparing the image (cv2.error ...)
                 if step.round == 1:
                     raise
                 answers.append(e)
@@ -369,18 +370,35 @@ class ReaderBridge:
                     scaler=BlockScaler(inp["image"], bbox, self.page_source, self.scale_sources)))
             settings = block_reader.ReadSettings(
                 self.threshold, self._clean, self.repair if self.judge else None,
-                (lambda r, t: self.ink_reread(r, t)) if self.ink_reread and not self.judge else None,
+                self._best_effort_ink_reread if self.ink_reread and not self.judge else None,
                 doc_hash=self.doc_hash, page=self.current_page)
             judge = (_DownJudge(judge_down) if judge_down else WorkerJudge(self.client, crops)) if self.judge else None
             results = block_reader.read_blocks(requests, self._reader(kwargs, crops), judge, settings)
         finally:
             crops.cleanup()
         for request, result in zip(requests, results):
-            self.outcomes[(self.current_page, request.bbox)] = result
+            key = (self.current_page, request.bbox)
+            if request.bbox is None:
+                print(f"warning: page {self.current_page + 1}: a Block came without a box; its Score cannot be "
+                      "matched to it in the JSON", file=sys.stderr)
+            elif key in self.outcomes:
+                print(f"warning: page {self.current_page + 1}: two Blocks have the same box {request.bbox}; only the "
+                      "later one's Score reaches the JSON", file=sys.stderr)
+            self.outcomes[key] = result
         for result in results:
             yield {"result": result.text}
 
     uses_worker_reader = False
+
+    def _best_effort_ink_reread(self, request, text):
+        """The ink-based re-read is an improvement attempt: when it fails (the worker ran out of memory or timed out,
+        a crop cannot be prepared) the Block keeps its first Reading and the page goes on."""
+        try:
+            return self.ink_reread(request, text)
+        except Exception as e:
+            print(f"warning: page {self.current_page + 1}: the re-read of block {request.bbox} failed, "
+                  f"keeping its first reading: {type(e).__name__}: {e}", file=sys.stderr)
+            return None
 
     def page_summary(self, page: int) -> dict:
         """How many Blocks of a page were judged, how many were re-read, how many are (still) below the threshold,

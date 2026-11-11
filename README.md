@@ -114,7 +114,7 @@ and in the Markdown, and the exit code is 1.
 | `--ocr-images` | off | also OCR any text inside figures |
 | `--no-merge-blocks` | | do not merge adjacent text blocks before OCR |
 | `--no-judge` | | do not score blocks (no Judge, no `playwright`, `node` or Noto Sans CJK needed). The ink-based re-read of short blocks runs instead |
-| `--judge-threshold FLOAT` | 0.5 | blocks whose Score is below this are re-read (up to 10 Readings, see "Re-reading low-Score Blocks"); the ones still below it afterwards are flagged `below_threshold` in the JSON and counted per page on stderr. The Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain; 0.5 is calibrated on one document (see "Tuning notes"). `0` keeps the Scores and re-reads nothing |
+| `--judge-threshold FLOAT` | 0.5 | a number from 0 to 1 (anything else is rejected); blocks whose Score is below this are re-read (up to 10 Readings, see "Re-reading low-Score Blocks"); the ones still below it afterwards are flagged `below_threshold` in the JSON and counted per page on stderr. The Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain; 0.5 is calibrated on one document (see "Tuning notes"). `0` keeps the Scores and re-reads nothing |
 | `--no-recover` | | with `--no-judge`, turn off the truncated-block re-read. With the Judge on that re-read never runs |
 | `--script {auto,off}` | `auto` | Simplified to Traditional repair; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |

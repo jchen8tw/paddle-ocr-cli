@@ -84,6 +84,41 @@ def test_a_read_that_never_answers_times_out_instead_of_hanging(client):
     assert not client.is_alive()  # the stream cannot be resynchronised, so the worker is killed
 
 
+def test_a_worker_that_stops_reading_its_input_cannot_block_the_writer_forever():
+    import time
+
+    c = make("deaf")
+    try:
+        c.start()
+        t0 = time.monotonic()
+        with pytest.raises(WorkerError, match="could not be sent within 1"):
+            c.read("a.png", "x" * 4_000_000, 1, timeout=1)  # far more than a pipe holds
+        assert time.monotonic() - t0 < 10
+        assert not c.is_alive()
+    finally:
+        c.close()
+
+
+def test_close_does_not_hang_on_a_worker_that_stopped_reading_its_input():
+    import threading
+    import time
+
+    c = make("deaf")
+    c.start()
+    c.quit_timeout = 0.5
+    def stuck_request():
+        try:
+            c._proc.stdin.write("x" * 4_000_000)
+        except (OSError, ValueError):
+            pass  # the worker was killed under it
+
+    threading.Thread(target=stuck_request, daemon=True).start()
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    c.close()
+    assert time.monotonic() - t0 < 20 and not c.is_alive()
+
+
 def test_restarts_are_capped():
     c = make(max_restarts=1)
     try:

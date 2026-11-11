@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
 
+from script_repair import NO_REPAIR_LABELS
+
 SCORED = "scored"
 # The official verdicts. Only SCORED carries a real Score. The first three mean the Reading is unusable,
 # the last two mean scoring never happened.
@@ -214,6 +216,8 @@ def read_blocks(requests: list[BlockRequest], reader: Reader, judge: Judge | Non
     `requests`."""
     first_step = settings.schedule[0]
     raws = reader.read(requests, first_step, [None] * len(requests))
+    if len(raws) != len(requests):  # zip() would silently drop the Blocks without an answer
+        raise RuntimeError(f"the Reader answered for {len(raws)} of {len(requests)} Blocks")
     results: list[BlockResult] = []
     blocks: list[_Block] = []
     items: list[JudgeItem] = []
@@ -253,7 +257,7 @@ def _new_reading(block: _Block, text: str, step: ReadStep, settings: ReadSetting
         reading.scale_source = scaler.source(step.scale)
     if settings.repair is not None:
         repaired, decided = settings.repair.apply(text, block.request.label, survey=survey)
-        reading.judged_before_script_decision = not decided
+        reading.judged_before_script_decision = not decided and block.request.label not in NO_REPAIR_LABELS
         if repaired != text:
             reading.text, reading.text_before_repair = repaired, text
     block.readings.append(reading)
@@ -277,7 +281,10 @@ def _passed(block: _Block, settings: ReadSettings) -> bool:
 
 def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSettings) -> None:
     """Rounds 2.. of the schedule, round by round over the Blocks still below the threshold: one Reader batch and one
-    Judge batch per round."""
+    Judge batch per round. A threshold of 0 (or less) turns re-reading off: nothing is below it, and a Block whose
+    first Reading is unusable has no Score to improve on either."""
+    if settings.threshold <= 0:
+        return
     for block in blocks:
         if block.readings[0].verdict in NOT_SCORED_VERDICTS:
             continue  # the Judge is not working: there is no Score to improve on, so no re-read
@@ -302,6 +309,10 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
         seeds = [derive_seed(settings.doc_hash, settings.page, b.request.seed_id, step.round)
                  if step.decode == "temperature" else None for b in active]
         answers = reader.read([b.request for b in active], step, seeds)
+        if len(answers) != len(active):  # no telling which Block an answer belongs to: none of them is used
+            for b in active:
+                b.stop = ("reader_error", f"round {step.round}: the Reader answered for {len(answers)} of {len(active)} Blocks")
+            continue
         items: list[JudgeItem] = []
         owners: list[tuple[_Block, Reading]] = []
         for b, texts in zip(active, answers):

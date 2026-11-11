@@ -179,6 +179,20 @@ def test_paddle_without_a_judge_makes_no_worker_calls(tmp_path):
     assert client.events == ["paddle"]
 
 
+def test_two_blocks_with_the_same_box_on_a_page_are_reported_instead_of_silently_losing_a_score(tmp_path, capsys):
+    b = minicpm(FakeClient(), tmp_path)
+    read_page(b, [item("OCR:", "text", (1, 2, 3, 4)), item("Table Recognition:", "table", (1, 2, 3, 4))], page=6)
+    err = capsys.readouterr().err
+    assert "page 7" in err and "(1, 2, 3, 4)" in err and "same box" in err
+    assert len(b.outcomes) == 1
+
+
+def test_a_block_without_a_box_is_reported(tmp_path, capsys):
+    plain = {"image": np.full((8, 16, 3), 255, np.uint8), "query": "OCR:"}  # not a BlockQuery: the hook did not tag it
+    read_page(minicpm(FakeClient(), tmp_path), [plain])
+    assert "without a box" in capsys.readouterr().err
+
+
 # --- the ink-based re-read, used without a Judge -------------------------------------------------------
 
 def test_without_a_judge_the_ink_reread_gets_the_block_with_its_bbox_and_may_replace_the_reading(tmp_path):
@@ -193,6 +207,21 @@ def test_without_a_judge_the_ink_reread_gets_the_block_with_its_bbox_and_may_rep
     assert read_page(b, [item("OCR:", "text", (3, 4, 5, 6))]) == ["a much longer reading"]
     assert seen == [((3, 4, 5, 6), "text", "x")]
     assert b.outcomes[(0, (3, 4, 5, 6))].text_before_reread == "x"
+
+
+def test_an_ink_reread_that_fails_keeps_the_first_reading_warns_and_does_not_fail_the_page(tmp_path, capsys):
+    class FailsOnSecondRead(FakeClient):
+        def read(self, image, prompt, max_new_tokens, **kw):
+            if len(self.calls) >= 2:  # the two first Readings succeed, the re-reads do not
+                raise WorkerError("worker error: CUDA out of memory")
+            return super().read(image, prompt, max_new_tokens, **kw)
+
+    b = minicpm(FailsOnSecondRead({"Text Recognition:": "short"}), tmp_path, judge=False)
+    b.ink_reread = lambda request, text: b.read_crop(request.image, "text")
+    assert read_page(b, [item("OCR:", "text", (1, 2, 3, 4)), item("OCR:", "text", (5, 6, 7, 8))]) == ["short", "short"]
+    err = capsys.readouterr().err
+    assert "keeping its first reading" in err and "out of memory" in err and "(5, 6, 7, 8)" in err
+    assert b.outcomes[(0, (5, 6, 7, 8))].text_before_reread is None
 
 
 def test_with_a_judge_the_ink_reread_is_not_called(tmp_path):

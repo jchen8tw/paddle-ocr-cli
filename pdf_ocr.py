@@ -50,6 +50,17 @@ MAX_RENDER_PIXELS = 40_000_000  # guard against huge pages exhausting memory at 
 
 # --------------------------------------------------------------------------- CLI
 
+def unit_interval(text: str) -> float:
+    """argparse type for a Score threshold: a number from 0 to 1 (NaN and out-of-range values are rejected)."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not 0.0 <= value <= 1.0:  # false for NaN as well
+        raise argparse.ArgumentTypeError(f"{text} is outside 0..1 (the Judge's Scores are between 0 and 1)")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pdf_ocr",
@@ -89,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not score blocks with the MiniCPM-OCR Jev Judge (needs the worker environment, Chromium, "
                         "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
                         "ink-based re-read of implausibly short blocks runs instead")
-    g.add_argument("--judge-threshold", type=float, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
+    g.add_argument("--judge-threshold", type=unit_interval, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
                    help="blocks scoring below this are re-read (up to 10 Readings, the best one is kept) and, if "
                         "still below it, flagged (below_threshold) in the JSON and counted on stderr. 0 turns the "
                         "re-reading off and keeps the Scores. The Judge authors' own value, 0.98, flags and re-reads "
@@ -451,29 +462,24 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
     differently scaled renders and keep the result only if it is clearly longer and plausible.
     (--reader paddle without the Judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
-    renders: dict[float, tuple] = {}
-    h_img, w_img = img.shape[:2]
+    renders = PageRenders(page, img, scale, args.dpi)
     for b in res["parsing_res_list"]:
         if b.label not in TEXT_LABELS:
             continue
-        x1, y1, x2, y2 = (int(v) for v in b.bbox)
-        crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
+        bbox = tuple(int(v) for v in b.bbox)
+        crop = renders.original(bbox)
         if crop.size == 0:
             continue
 
-        def reread_at_scale(factor, x1=x1, y1=y1, x2=x2, y2=y2):
-            if factor not in renders:
-                renders[factor] = render_page(page, args.dpi * factor)
-            img2, scale2 = renders[factor]
-            k, pad = scale2 / scale, 4
-            r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
+        def reread_at_scale(factor, bbox=bbox):
+            r = renders.region(bbox, factor)
             out = pipe.predict(r, use_layout_detection=False, prompt_label="ocr",
                                max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
 
         better = ink_reread_block(crop, b.content, reread_at_scale)
         if better is not None:
-            notes.append({"bbox": [x1, y1, x2, y2], "original": b.content})
+            notes.append({"bbox": list(bbox), "original": b.content})
             b.content = better
     return notes
 
@@ -490,17 +496,29 @@ class PageRenders:
         x1, y1, x2, y2 = bbox
         return self.img[max(y1, 0):y2, max(x1, 0):x2]
 
-    def crop(self, bbox, factor: float):
-        """The Block's box cut from the page rendered `factor` times larger, or None if the render could not be made
-        that much larger (the render size is capped)."""
+    def _render(self, factor: float):
+        """(the page rendered at `dpi * factor`, how many times larger than the page's own render that really is:
+        the render size is capped, so this can be less than `factor`)."""
         if factor not in self._renders:
             self._renders[factor] = render_page(self.page, self.dpi * factor)
         img2, scale2 = self._renders[factor]
-        k = scale2 / self.scale
+        return img2, scale2 / self.scale
+
+    def crop(self, bbox, factor: float):
+        """The Block's box cut from the page rendered `factor` times larger, or None if the render could not be made
+        that much larger (the render size is capped)."""
+        img2, k = self._render(factor)
         if abs(k - factor) > 0.01:
             return None
         x1, y1, x2, y2 = (round(v * k) for v in bbox)
         return img2[max(y1, 0):y2, max(x1, 0):x2]
+
+    def region(self, bbox, factor: float, pad: int = 4):
+        """The Block's box plus `pad` pixels of margin cut from the page rendered `factor` times larger (as large as
+        the cap allows), for the ink-based re-read of a short Block, which reads whatever it gets."""
+        img2, k = self._render(factor)
+        x1, y1, x2, y2 = bbox
+        return img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
 
 
 class InkReread:
@@ -508,29 +526,22 @@ class InkReread:
     the page it belongs to is set here before the pipeline runs. Re-reads go straight to the Reader."""
 
     def __init__(self):
-        self.page = None  # (pdf page, BGR render, px per pt, renders cache)
+        self.renders: PageRenders | None = None
 
-    def set_page(self, page, img, scale: float) -> None:
-        self.page = (page, img, scale, {})
+    def set_page(self, renders: PageRenders) -> None:
+        self.renders = renders
 
     def reread_with(self, bridge, args):
         def ink_reread(request, text):
-            if self.page is None or request.label not in TEXT_LABELS or request.bbox is None:
+            if self.renders is None or request.label not in TEXT_LABELS or request.bbox is None:
                 return None
-            page, img, scale, renders = self.page
-            h_img, w_img = img.shape[:2]
-            x1, y1, x2, y2 = request.bbox
-            crop = img[max(y1, 0):min(y2, h_img), max(x1, 0):min(x2, w_img)]
+            renders, bbox = self.renders, tuple(request.bbox)
+            crop = renders.original(bbox)
             if crop.size == 0:
                 return None
 
             def reread_at_scale(factor):
-                if factor not in renders:
-                    renders[factor] = render_page(page, args.dpi * factor)
-                img2, scale2 = renders[factor]
-                k, pad = scale2 / scale, 4
-                r = img2[max(int(y1 * k) - pad, 0):int(y2 * k) + pad, max(int(x1 * k) - pad, 0):int(x2 * k) + pad]
-                return bridge.read_crop(r, "text", args.max_new_tokens).strip()
+                return bridge.read_crop(renders.region(bbox, factor), "text", args.max_new_tokens).strip()
 
             return ink_reread_block(crop, text, reread_at_scale)
 
@@ -596,6 +607,17 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes
         "blocks": blocks,
         "layout_detections": detections,
     }
+
+
+def blocks_without_outcome(idx: int, res, outcomes: dict) -> list[tuple[str, tuple]]:
+    """(label, box) of the Blocks of a page that should have been judged but have no outcome, which the outcomes
+    (keyed by page and box) cannot match to the page's Blocks. Expected to be empty."""
+    missing = []
+    for b in res["parsing_res_list"]:
+        bbox = tuple(int(v) for v in b.bbox)
+        if block_reader.judge_category(b.label) is not None and (idx, bbox) not in outcomes:
+            missing.append((b.label, bbox))
+    return missing
 
 
 def add_judge_fields(block: dict, outcome) -> None:
@@ -967,13 +989,17 @@ def _transcribe(args, stack) -> int:
             if bridge is not None:
                 bridge.current_page = idx
                 bridge.page_source = PageRenders(page, img, scale, args.dpi)
-                ink.set_page(page, img, scale)
+                ink.set_page(bridge.page_source)
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             recovered = []
             if args.no_judge and not args.no_recover and not args.reader == "minicpm":
                 recovered = recover_short_blocks(pipe, page, res, img, scale, args)  # PaddleOCR-VL, as before
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
+            if bridge is not None and not args.no_judge:
+                for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
+                    print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
+                          "Reader hook, or its box changed after reading)", file=sys.stderr)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
             print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
