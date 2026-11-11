@@ -61,7 +61,7 @@ def test_the_setup_checks_follow_the_planning_and_nothing_is_written_when_they_f
     folder = folder_of(tmp_path, "a.pdf", "sub/b.pdf")
     code, err = run_refused([str(folder), "-o", str(tmp_path / "out"), *NO_MODELS], capsys)
     assert code.startswith("error: model folder(s) not found")
-    assert err == f"found 2 Documents in {folder}\n"
+    assert err == f"found 2 Documents in {folder} (0 already done)\n"
     assert not (tmp_path / "out").exists()
 
 
@@ -101,8 +101,8 @@ def test_a_folder_run_writes_each_document_to_its_mirrored_folder_and_exits_0(tm
     assert doc["source"]["file"] == "a.PDF"  # the bare file name, as in a single-PDF Run
     assert doc["elapsed_seconds"] < 100  # the Document's own time, not the model load
     err = capsys.readouterr().err
-    assert err.splitlines()[0] == f"found 2 Documents in {folder}"
-    assert err.splitlines()[-1] == "2 Documents: 2 written, 0 failed"
+    assert err.splitlines()[0] == f"found 2 Documents in {folder} (0 already done)"
+    assert err.splitlines()[-1] == "2 Documents: 2 written, 0 skipped, 0 failed"
     assert loaded.checks == 1 and loaded.loads == 1
 
 
@@ -122,14 +122,14 @@ def test_the_stderr_of_a_folder_run_has_a_header_per_document_and_a_summary_with
     out = tmp_path / "out"
     assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
     lines = capsys.readouterr().err.splitlines()
-    assert lines[0] == f"found 4 Documents in {folder}"
+    assert lines[0] == f"found 4 Documents in {folder} (0 already done)"
     assert lines[1] == "[1/4] a.pdf (2 pages)"
     assert lines[2].startswith("[  1/2] page 1:") and lines[3].startswith("[  2/2] page 2:")
     assert lines[4].startswith(f"wrote {out / 'a' / 'a.md'} and {out / 'a' / 'a.json'}")
     assert lines[5].startswith("[2/4] bad.pdf FAILED: cannot open ")  # reported where it happens, nothing else for it
     assert lines[6].startswith("[3/4] gone.pdf FAILED: cannot open ")
     assert lines[7] == "[4/4] sub/b.pdf (2 pages)"
-    assert lines[-3] == "4 Documents: 2 written, 2 failed"
+    assert lines[-3] == "4 Documents: 2 written, 0 skipped, 2 failed"
     assert lines[-2].startswith("  bad.pdf: cannot open ") and lines[-1].startswith("  gone.pdf: cannot open ")
     assert sorted(p.name for p in out.iterdir()) == ["a", "sub"]  # no output folder, no JSON, for a failed Document
     assert (out / "sub" / "b" / "b.json").is_file()
@@ -143,7 +143,7 @@ def test_a_failed_page_is_a_failed_document_run_exit_1_but_its_output_is_written
     assert read_json(out / "a" / "a.json")["source"]["pages_failed"] == [1]
     assert read_json(out / "b" / "b.json")["source"]["pages_failed"] == [1]
     lines = capsys.readouterr().err.splitlines()
-    assert lines[-3] == "2 Documents: 2 written, 0 failed"
+    assert lines[-3] == "2 Documents: 2 written, 0 skipped, 0 failed"
     assert lines[-2:] == ["  a.pdf: page 1 failed (recorded in its JSON)", "  b.pdf: page 1 failed (recorded in its JSON)"]
 
 
@@ -161,7 +161,7 @@ def test_a_document_that_raises_is_reported_and_the_run_continues(tmp_path, caps
     assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
     assert (out / "a" / "a.json").is_file() and (out / "c" / "c.json").is_file() and not (out / "boom").exists()
     err = capsys.readouterr().err
-    assert "3 Documents: 2 written, 1 failed\n  boom.pdf: RuntimeError: the disk is full\n" in err
+    assert "3 Documents: 2 written, 0 skipped, 1 failed\n  boom.pdf: RuntimeError: the disk is full\n" in err
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
@@ -171,3 +171,105 @@ def test_a_pdf_that_cannot_be_read_is_reported_and_the_run_continues(tmp_path, c
     assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 1
     assert "  locked.pdf: cannot open " in capsys.readouterr().err
     assert (tmp_path / "out" / "z" / "z.json").is_file() and not (tmp_path / "out" / "locked").exists()
+
+
+# --- a second Run of the same folder: what is already done is skipped ------------------------------------------------
+
+def snapshot(root):
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_force_with_a_single_pdf_is_a_usage_error_before_anything_else(tmp_path, capsys, loaded):
+    pdf = blank_pdf(tmp_path / "a.pdf")
+    code, err = run_refused([str(pdf), "-o", str(tmp_path / "out"), "--force"], capsys)
+    assert code == 2 and "--force" in err and "folder" in err
+    assert not (tmp_path / "out").exists() and (loaded.checks, loaded.loads) == (0, 0)
+
+
+def test_a_single_pdf_is_never_skipped(tmp_path, loaded):
+    pdf = blank_pdf(tmp_path / "a.pdf")
+    argv = [str(pdf), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0 and pdf_ocr.main(argv) == 0
+    assert (loaded.checks, loaded.loads) == (2, 2)
+
+
+def test_a_folder_whose_documents_are_all_done_exits_0_without_the_setup_checks_or_a_model(
+        tmp_path, capsys, loaded, monkeypatch):
+    folder = folder_of(tmp_path, "b.pdf", "sub/a.PDF")
+    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0
+    before = snapshot(tmp_path / "out")
+    capsys.readouterr()
+    monkeypatch.undo()  # the real setup checks again: reaching them with these models would be an error
+    assert pdf_ocr.main([*argv, *NO_MODELS]) == 0
+    assert capsys.readouterr().err.splitlines() == [
+        f"found 2 Documents in {folder} (2 already done)",
+        "[1/2] b.pdf skipped: already done",
+        "[2/2] sub/a.PDF skipped: already done",
+        "2 Documents: 0 written, 2 skipped, 0 failed"]
+    assert snapshot(tmp_path / "out") == before
+    assert (loaded.checks, loaded.loads) == (1, 1)  # only the first Run
+
+
+def test_a_second_run_processes_only_what_is_new_and_numbers_it_by_its_place_in_the_whole_run(
+        tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "b.pdf", "d.pdf")
+    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0
+    before = snapshot(tmp_path / "out")
+    blank_pdf(folder / "a.pdf"), blank_pdf(folder / "sub.pdf")  # a new one before the done ones, one after
+    capsys.readouterr()
+    assert pdf_ocr.main(argv) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[:4] == [f"found 4 Documents in {folder} (2 already done)",
+                         "[2/4] b.pdf skipped: already done", "[3/4] d.pdf skipped: already done", "[1/4] a.pdf (1 pages)"]
+    assert lines[4].startswith("[  1/1] page 1:") and lines[5].startswith("wrote ")
+    assert lines[6] == "[4/4] sub.pdf (1 pages)"
+    assert lines[-1] == "4 Documents: 2 written, 2 skipped, 0 failed"
+    assert (loaded.checks, loaded.loads) == (2, 2)
+    after = snapshot(tmp_path / "out")
+    assert {k: v for k, v in after.items() if k.startswith(("b/", "d/"))} == before  # the done ones were not touched
+    assert "a/a.json" in after and "sub/sub.json" in after
+
+
+def test_a_document_that_failed_before_is_retried_and_a_skipped_one_never_makes_the_exit_code_1(
+        tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "a.pdf", "z.pdf")
+    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    loaded.client.fail_on = "Text Recognition:"  # every page fails: both Documents are written with failed pages
+    assert pdf_ocr.main(argv) == 1
+    loaded.client.fail_on = None
+    assert pdf_ocr.main(argv) == 0  # both retried, and now fine
+    capsys.readouterr()
+    (folder / "a.pdf").write_bytes(b"not a pdf any more")
+    assert pdf_ocr.main(argv) == 1  # a.pdf changed (and cannot be opened); z.pdf is skipped
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == f"found 2 Documents in {folder} (1 already done)"
+    assert "[2/2] z.pdf skipped: already done" in lines
+    assert lines[-2] == "2 Documents: 0 written, 1 skipped, 1 failed"
+    assert lines[-1].startswith("  a.pdf: cannot open ")
+
+
+def test_force_redoes_every_document(tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "a.pdf", "sub/b.pdf")
+    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0
+    first = snapshot(tmp_path / "out")
+    capsys.readouterr()
+    assert pdf_ocr.main([*argv, "--force"]) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == f"found 2 Documents in {folder} (0 already done)"
+    assert "[1/2] a.pdf (1 pages)" in lines and "[2/2] sub/b.pdf (1 pages)" in lines
+    assert lines[-1] == "2 Documents: 2 written, 0 skipped, 0 failed" and not any("skipped:" in ln for ln in lines)
+    assert (loaded.checks, loaded.loads) == (2, 2)
+    assert snapshot(tmp_path / "out").keys() == first.keys()
+
+
+def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "a.pdf")
+    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0
+    capsys.readouterr()
+    assert pdf_ocr.main([*argv, "--no-page-markers"]) == 0
+    assert "1 Documents: 1 written, 0 skipped, 0 failed" in capsys.readouterr().err
+    assert "<!-- page 1 -->" not in (tmp_path / "out" / "a" / "a.md").read_text(encoding="utf-8")
