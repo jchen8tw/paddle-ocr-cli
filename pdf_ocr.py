@@ -50,6 +50,17 @@ MAX_RENDER_PIXELS = 40_000_000  # guard against huge pages exhausting memory at 
 
 # --------------------------------------------------------------------------- CLI
 
+def unit_interval(text: str) -> float:
+    """argparse type for a Score threshold: a number from 0 to 1 (NaN and out-of-range values are rejected)."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not 0.0 <= value <= 1.0:  # false for NaN as well
+        raise argparse.ArgumentTypeError(f"{text} is outside 0..1 (the Judge's Scores are between 0 and 1)")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pdf_ocr",
@@ -89,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not score blocks with the MiniCPM-OCR Jev Judge (needs the worker environment, Chromium, "
                         "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
                         "ink-based re-read of implausibly short blocks runs instead")
-    g.add_argument("--judge-threshold", type=float, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
+    g.add_argument("--judge-threshold", type=unit_interval, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
                    help="blocks scoring below this are re-read (up to 10 Readings, the best one is kept) and, if "
                         "still below it, flagged (below_threshold) in the JSON and counted on stderr. 0 turns the "
                         "re-reading off and keeps the Scores. The Judge authors' own value, 0.98, flags and re-reads "

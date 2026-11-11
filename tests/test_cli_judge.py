@@ -18,6 +18,18 @@ def test_the_judge_is_on_by_default_with_the_official_threshold():
     assert args("--judge-threshold", "0.9").judge_threshold == 0.9
 
 
+@pytest.mark.parametrize("bad", ["nan", "-0.1", "1.5", "inf", "abc"])
+def test_a_judge_threshold_outside_0_to_1_is_rejected_at_parse_time(bad, capsys):
+    with pytest.raises(SystemExit):
+        args("--judge-threshold", bad)
+    assert "--judge-threshold" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("ok", ["0", "1", "0.5"])
+def test_the_ends_of_the_judge_threshold_range_are_accepted(ok):
+    assert args("--judge-threshold", ok).judge_threshold == float(ok)
+
+
 def test_the_judge_needs_its_model_folder_unless_it_is_off(tmp_path):
     assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
     assert pdf_ocr.required_model_dirs(args("--no-judge")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
