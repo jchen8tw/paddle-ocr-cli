@@ -10,7 +10,8 @@ is the same thing for a single Block.
 
 Re-reading (ticket #5): after the first Reading, the Blocks whose best Score is still below the threshold are
 read again, round by round (SCHEDULE), each round being one batch for the Reader and one batch for the Judge;
-the highest Score wins. A Block that passes on its first Reading costs nothing extra.
+the highest Score wins. A Block that passes on its first Reading costs nothing extra. The flag stays the first
+Reading's (issue #9): a re-read that reaches the threshold can still be a misread, so it never clears the flag.
 
 Per Reading: Reader -> `clean` (repetition cut, OTSL to HTML, table line breaks) -> sticky Simplified to
 Traditional repair -> Judge. With no Judge the repair is left to the document-level pass and the ink-based
@@ -172,7 +173,7 @@ class BlockResult:
     score: float | None = None                 # a real Score, only with verdict "scored"
     verdict: str | None = None                 # None for a Block that was not judged
     verdict_detail: str | None = None
-    flagged: bool | None = None                # None for a Block that was not judged
+    flagged: bool | None = None                # decided by the first Reading; None for a Block that was not judged
     text_before_repair: str | None = None      # set when the sticky repair changed the Reading before judging
     judged_before_script_decision: bool = False  # judged before the document was known to be Traditional
     text_before_reread: str | None = None      # set when the ink-based re-read replaced the Reading
@@ -274,9 +275,9 @@ def _score(judge: Judge, items: list[JudgeItem], owners: list[tuple[_Block, Read
         reading.score = v.score if v.verdict == SCORED else None  # a sentinel 0.0 or -1.0 is not a Score
 
 
-def _passed(block: _Block, settings: ReadSettings) -> bool:
-    best = block.best
-    return best is not None and best.score >= settings.threshold
+def _reaches(reading: Reading | None, threshold: float) -> bool:
+    return (reading is not None and reading.verdict == SCORED and reading.score is not None
+            and reading.score >= threshold)
 
 
 def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSettings) -> None:
@@ -289,7 +290,7 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
         if block.readings[0].verdict in NOT_SCORED_VERDICTS:
             continue  # the Judge is not working: there is no Score to improve on, so no re-read
         block.entered = True
-        if _passed(block, settings):
+        if _reaches(block.best, settings.threshold):
             block.stop = ("passed", None)
     for step in settings.schedule[1:]:
         active = [b for b in blocks if b.entered and b.stop is None]
@@ -339,7 +340,7 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
             if b.stop is not None:
                 continue
             fresh = [r for r in b.readings if r.round == step.round]
-            if _passed(b, settings):
+            if _reaches(b.best, settings.threshold):
                 b.stop = ("passed", None)
             elif any(r.verdict in NOT_SCORED_VERDICTS for r in fresh):
                 detail = next(r.detail for r in fresh if r.verdict in NOT_SCORED_VERDICTS)
@@ -353,7 +354,7 @@ def _finish(block: _Block, settings: ReadSettings) -> None:
     result.text, result.text_before_repair = winner.text, winner.text_before_repair
     result.judged_before_script_decision = winner.judged_before_script_decision
     result.verdict, result.verdict_detail, result.score = winner.verdict, winner.detail, winner.score
-    result.flagged = not (best is not None and best.score >= settings.threshold)
+    result.flagged = not _reaches(block.readings[0], settings.threshold)
     if not block.entered or block.produced == 1 and block.stop == ("passed", None):
         return  # not re-read: the first Reading's own verdict says it all
     stop = block.stop or ("exhausted" if best is not None else "no_scored", None)
