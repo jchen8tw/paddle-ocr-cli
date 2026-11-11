@@ -53,7 +53,16 @@ _Avoid_: status, result
 
 ### Runs
 
+**Document**:
+One input PDF, the unit that gets its own Markdown, JSON and CSVs.
+_Avoid_: file, input, PDF (as a role name)
+
+**Run**:
+One invocation of the tool: one Document, or every Document under a folder, all with one Engine and one set
+of settings.
+_Avoid_: batch, job
+
 **Engine**:
-The full set of models and library versions used in one run (Layout model, Reader, Judge), not any
+The full set of models and library versions used in one Run (Layout model, Reader, Judge), not any
 single model.
 _Avoid_: backend, pipeline
