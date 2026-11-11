@@ -132,7 +132,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The command line, with the Judge settled: `judge` is a bool, and `judge_threshold` is a float exactly when
-    `judge` is true (None otherwise). Consumers trust that pairing and never re-check it."""
+    `judge` is true (None otherwise)."""
     parser = _parser()
     args = parser.parse_args(argv)
     if args.judge_threshold is not None and not args.judge:
@@ -237,7 +237,7 @@ def missing_models_message(args) -> str | None:
             f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
 
 
-WORKER_FREE = "a run without --reader minicpm and --judge does not need it"  # true while needs_worker() is that rule
+WORKER_FREE = "a run without --reader minicpm and --judge does not need it"
 
 
 def worker_env_path() -> Path:
@@ -245,7 +245,7 @@ def worker_env_path() -> Path:
 
 
 def needs_worker(args) -> bool:
-    """The torch worker holds MiniCPM (--reader minicpm) and Jev (--judge). A run with neither does not need it."""
+    """The torch worker holds MiniCPM (--reader minicpm) and Jev (--judge)."""
     return args.reader == "minicpm" or args.judge
 
 
@@ -710,8 +710,7 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
-# (reader, judge) -> what to try. Peaks measured on pages 38-58 of one document (README, "Readers compared"):
-# PaddleOCR-VL alone 9,657 MiB, MiniCPM-OCR-1.0 alone 5,408 MiB.
+# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
 MEMORY_WAYS_OUT = {
     ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
                        "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
