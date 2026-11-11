@@ -187,13 +187,13 @@ def test_the_postprocessing_summary_reports_re_read_blocks_and_flagged_blocks():
     r = lambda text, rnd, score, dup=0: Reading(text, rnd, "greedy", None, 1.0, verdict="scored", score=score, duplicates=dup)
     outcomes = {
         (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", flagged=False),     # passed at once
-        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", flagged=False,
+        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", flagged=True,
                                    readings=[r("a", 1, 0.5), r("b", 2, 0.99)], stop_reason="passed"),
         (1, (0, 0, 1, 1)): outcome(judged=True, score=0.7, verdict="scored", flagged=True, stop_reason="exhausted",
                                    readings=[r("a", 1, 0.5, dup=2), r("b", 3, 0.7)]),
     }
     summary = pdf_ocr.judge_summary(outcomes)
-    assert (summary["blocks_judged"], summary["blocks_reread"], summary["blocks_flagged"]) == (3, 2, 1)
+    assert (summary["blocks_judged"], summary["blocks_reread"], summary["blocks_flagged"]) == (3, 2, 2)
     assert summary["reread_stop_reasons"] == {"exhausted": 1, "passed": 1}
     assert summary["readings_beyond_the_first"] == 1 + 3
 

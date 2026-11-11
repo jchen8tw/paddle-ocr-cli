@@ -41,8 +41,7 @@ def test_a_re_read_block_has_readings_a_stop_reason_and_the_winners_content_and_
         if scored:
             assert b["score"] == max(scored)  # the highest Score wins, not the latest
             assert b["stop_reason"] != "no_scored"
-        if b["stop_reason"] == "exhausted":
-            assert b["flagged"] is True
+        assert b["flagged"] is True  # a re-read never clears the flag
         if reader == "paddle":  # the local PaddleOCR-VL cannot sample: rounds 3 and 4 are recorded as skipped
             assert [s["round"] for s in b["skipped_rounds"]] == [3, 4]
             assert {r["round"] for r in readings} <= {1, 2}

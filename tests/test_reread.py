@@ -85,7 +85,7 @@ def test_the_schedule_is_greedy_1x_greedy_1_25x_four_samples_at_0_3_four_samples
         (4, "temperature", 0.7, 1.0, 4)]
 
 
-def test_a_block_that_passes_on_the_first_reading_is_read_once_and_has_no_readings():
+def test_a_block_that_passes_on_the_first_reading_is_read_once_has_no_readings_and_is_not_flagged():
     reader, judge = ScriptedReader(), ScriptedJudge(default=("scored", 0.95))
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1] and len(judge.calls) == 1
@@ -98,7 +98,7 @@ def test_it_stops_as_soon_as_a_reading_passes():
     judge = ScriptedJudge({"good": 0.97})
     out = read_block(req("a"), reader, judge, settings())
     assert reader.rounds == [1, 2]
-    assert (out.text, out.score, out.flagged, out.stop_reason) == ("good", 0.97, False, "passed")
+    assert (out.text, out.score, out.flagged, out.stop_reason) == ("good", 0.97, True, "passed")
     assert [r.text for r in out.readings] == [first(), "good"]
 
 
@@ -176,6 +176,24 @@ def test_the_winner_that_is_not_the_first_reading_replaces_the_blocks_text_score
     judge = ScriptedJudge({first(): ("render_error", None), "x2": 0.6})
     out = read_block(req("a"), reader, judge, settings())
     assert (out.text, out.score, out.verdict) == ("x2", 0.6, "scored")
+
+
+# ------------------------------------------------------------------ the flag comes from the first Reading
+
+def test_a_re_read_that_reaches_the_threshold_does_not_clear_the_flag_of_a_low_first_reading():
+    reader = ScriptedReader({("a", 1): "薈繳", ("a", 2): "薑繳"})  # the truth is 躉繳: the winner is still a misread
+    judge = ScriptedJudge({"薈繳": 0.05, "薑繳": 0.87})
+    out = read_block(req("a"), reader, judge, settings(threshold=0.5))
+    assert (out.text, out.score, out.flagged, out.stop_reason) == ("薑繳", 0.87, True, "passed")
+
+
+@pytest.mark.parametrize("verdict", ["precheck_reject", "render_error", "missing_original_image"])
+def test_an_unusable_first_reading_keeps_the_block_flagged_when_a_re_read_reaches_the_threshold(verdict):
+    reader = ScriptedReader({("a", 2): "good"})
+    judge = ScriptedJudge({first(): (verdict, None), "good": 0.97})
+    out = read_block(req("a"), reader, judge, settings())
+    assert (out.text, out.score, out.verdict, out.stop_reason) == ("good", 0.97, "scored", "passed")
+    assert out.flagged is True
 
 
 # ------------------------------------------------------------------ duplicates

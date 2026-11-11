@@ -92,7 +92,7 @@ def test_with_the_judge_on_every_judged_block_has_a_score_a_verdict_and_a_flag(c
                                     "encode_error", "forward_error"}
             assert (b["score"] is not None) == (b["verdict"] == "scored")
             assert b["score"] is None or 0.0 <= b["score"] <= 1.0
-            assert b["flagged"] == (b["score"] is None or b["score"] < DEFAULT_JUDGE_THRESHOLD)
+            assert b["flagged"] == ("readings" in b or b["score"] is None or b["score"] < DEFAULT_JUDGE_THRESHOLD)
             judged += 1
     assert judged > 0
     assert doc["postprocessing"]["judge"]["blocks_judged"] == judged
