@@ -5,15 +5,17 @@ The sample PDF is gitignored, so it comes from outside:
     PDF_OCR_SAMPLE_PDF="/path/to/台灣人壽解約金 115.09.23.pdf" pytest -m gpu   # the document tests/baseline.json was measured on
     PDF_OCR_PAGES=42-45                                         # pages to run (default: "pages" in tests/baseline.json)
     PDF_OCR_MODELS_DIR=/path/to/models                          # default: ./models
-    PDF_OCR_CER_BOUND=0.01                                      # overrides the per-Reader bound in tests/baseline.json
+    PDF_OCR_CER_BOUND=0.01                                      # overrides each configuration's bound in tests/baseline.json
     PDF_OCR_READERS=minicpm                                     # readers to run (default: minicpm,paddle)
     PDF_OCR_REREAD_PAGES=4-5                                    # pages of the forced re-read runs (default: 4-5)
     PDF_OCR_WORKER_ENV=/path/to/worker-venv                     # worker environment (default: worker/.venv)
 
-The end-to-end tests run once per Reader; a Reader whose model folder or environment is missing is skipped.
-The Judge is on by default, so the worker environment, `playwright install chromium`, node and Noto Sans CJK are
-needed for every run that does not pass --no-judge (see the README). Set PLAYWRIGHT_BROWSERS_PATH if Chromium is
-not in the default place.
+The end-to-end tests run once per measured configuration of tests/baseline.json (a run with no options, and each
+Reader with --judge), plus a few per-Reader runs; PDF_OCR_READERS keeps only the configurations and runs of the
+Readers it names. A run whose model folders, worker environment or Judge renderer are missing is skipped, by the
+CLI's own checks: the worker environment is needed for --reader minicpm and --judge, and `playwright install
+chromium`, node and Noto Sans CJK for --judge (see the README). Set PLAYWRIGHT_BROWSERS_PATH if Chromium is not in
+the default place.
 """
 import hashlib
 import importlib.util
@@ -21,16 +23,52 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import pdf_ocr
+
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = json.loads((Path(__file__).parent / "baseline.json").read_text(encoding="utf-8"))
+READERS = os.environ.get("PDF_OCR_READERS", "minicpm,paddle").split(",")
+REREAD_THRESHOLD = "0.9999"  # so high that nearly every Block is re-read
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: slow end-to-end test that needs the GPU, the models and a sample PDF")
+
+
+@dataclass(frozen=True)
+class Config:
+    """A measured configuration: its name and its entry in tests/baseline.json."""
+    name: str
+    argv: tuple[str, ...]
+    record: dict
+
+    @property
+    def options(self):
+        return pdf_ocr.parse_args(["x.pdf", *self.argv])
+
+
+CONFIGS = [c for name, rec in BASELINE["configurations"].items()
+           if (c := Config(name, tuple(rec["argv"]), rec)).options.reader in READERS]
+JUDGED = [c for c in CONFIGS if c.options.judge]
+
+
+def models_root() -> Path:
+    return Path(os.environ.get("PDF_OCR_MODELS_DIR", ROOT / "models"))
+
+
+def _models_dir(*folders: str) -> Path:
+    d = models_root()
+    for name in folders:
+        if not (d / name).is_dir():
+            pytest.skip(f"model folder missing: {d / name}")
+    if importlib.util.find_spec("paddle") is None:
+        pytest.skip("paddle is not installed in this environment (run pytest from the project venv)")
+    return d
 
 
 @pytest.fixture(scope="session")
@@ -44,39 +82,10 @@ def sample_pdf() -> Path:
     return pdf
 
 
-READERS = os.environ.get("PDF_OCR_READERS", "minicpm,paddle").split(",")
-READER_DIRS = {"minicpm": "MiniCPM-OCR-1.0", "paddle": "PaddleOCR-VL-1.6"}
-
-
-def _models_dir(*folders: str) -> Path:
-    d = Path(os.environ.get("PDF_OCR_MODELS_DIR", ROOT / "models"))
-    for name in folders:
-        if not (d / name).is_dir():
-            pytest.skip(f"model folder missing: {d / name}")
-    if importlib.util.find_spec("paddle") is None:
-        pytest.skip("paddle is not installed in this environment (run pytest from the project venv)")
-    return d
-
-
 @pytest.fixture(scope="session")
 def layout_models_dir() -> Path:
     """For tests that need only the Layout model (the Reader is faked)."""
     return _models_dir("PP-DocLayoutV3")
-
-
-@pytest.fixture(scope="session", params=READERS)
-def reader(request) -> str:
-    if request.param == "minicpm":
-        import pdf_ocr
-
-        if problem := pdf_ocr.worker_env_problem():
-            pytest.skip(problem)
-    return request.param
-
-
-@pytest.fixture(scope="session")
-def models_dir(reader) -> Path:
-    return _models_dir("PP-DocLayoutV3", READER_DIRS[reader], "MiniCPM-OCR-Jev")
 
 
 @pytest.fixture(scope="session")
@@ -85,8 +94,112 @@ def pages() -> str:
 
 
 @pytest.fixture(scope="session")
-def cer_bound(reader, sample_pdf, pages) -> float:
-    """The recorded bound for this Reader. It was measured on one document and one page range, so it is only
+def reread_pages() -> str:
+    return os.environ.get("PDF_OCR_REREAD_PAGES", "4-5")
+
+
+class Cli:
+    """Runs pdf_ocr.py on the sample in a subprocess, once per distinct meaning: a run is identified by its parsed
+    options, so `--reader paddle` and no options are one run. Each run gets a models folder holding symlinks to
+    exactly required_model_dirs(options), and, unless needs_worker(options), a PDF_OCR_WORKER_ENV that does not
+    exist, so every run also proves that the CLI asks only for what its options use."""
+
+    def __init__(self, pdf: Path, pages: str, tmp: pytest.TempPathFactory):
+        self.pdf, self.pages, self.tmp = pdf, pages, tmp
+        self.done: dict[tuple[str, int], Path] = {}
+
+    def runs(self, *argv: str, n: int = 1, pages: str | None = None) -> list[Path]:
+        pages = pages or self.pages
+        options = pdf_ocr.parse_args([str(self.pdf), "--models-dir", str(models_root()), "--pages", pages, *argv])
+        if msg := pdf_ocr.missing_models_message(options):
+            pytest.skip(msg)
+        if importlib.util.find_spec("paddle") is None:
+            pytest.skip("paddle is not installed in this environment (run pytest from the project venv)")
+        if pdf_ocr.needs_worker(options) and (problem := pdf_ocr.worker_env_problem()):
+            pytest.skip(problem)
+        if options.judge and (problems := pdf_ocr.judge_setup_problems()):
+            pytest.skip("; ".join(problems))
+        key = repr(sorted(vars(options).items()))
+        for i in range(n):
+            if (key, i) not in self.done:
+                self.done[key, i] = self._run(options, argv, pages)
+        return [self.done[key, i] for i in range(n)]
+
+    def run(self, *argv: str, pages: str | None = None) -> Path:
+        return self.runs(*argv, pages=pages)[0]
+
+    def _run(self, options, argv: tuple[str, ...], pages: str) -> Path:
+        label = " ".join(argv) or "(no options)"
+        out = self.tmp.mktemp("run")
+        models = self.tmp.mktemp("models")
+        for name in pdf_ocr.required_model_dirs(options):
+            (models / name).symlink_to(models_root() / name, target_is_directory=True)
+        env = dict(os.environ)
+        if not pdf_ocr.needs_worker(options):
+            env["PDF_OCR_WORKER_ENV"] = str(self.tmp.mktemp("no_worker") / "missing")
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "pdf_ocr.py"), str(self.pdf), "-o", str(out), "--models-dir", str(models),
+             "--pages", pages, *argv],
+            capture_output=True, text=True, cwd=ROOT, env=env,
+        )
+        (out / "stderr.txt").write_text(done.stderr, encoding="utf-8")
+        assert done.returncode == 0, f"CLI run ({label}) failed:\n{done.stderr[-2000:]}"
+        return out
+
+
+@pytest.fixture(scope="session")
+def cli(sample_pdf, pages, tmp_path_factory) -> Cli:
+    return Cli(sample_pdf, pages, tmp_path_factory)
+
+
+@pytest.fixture(scope="session", params=CONFIGS, ids=lambda c: c.name)
+def config(request) -> Config:
+    return request.param
+
+
+@pytest.fixture(scope="session", params=JUDGED, ids=lambda c: c.name)
+def judged_config(request) -> Config:
+    return request.param
+
+
+@pytest.fixture(scope="session", params=READERS)
+def reader(request) -> str:
+    return request.param
+
+
+@pytest.fixture(scope="session")
+def config_runs(cli, config) -> list[Path]:
+    """Output folders of two runs of a measured configuration, with stderr.txt next to the outputs."""
+    return cli.runs(*config.argv, n=2)
+
+
+@pytest.fixture(scope="session")
+def judged_runs(cli, judged_config) -> list[Path]:
+    """The runs of a configuration with the Judge on (the same runs as config_runs)."""
+    return cli.runs(*judged_config.argv, n=2)
+
+
+@pytest.fixture(scope="session")
+def judge_off_run(cli, reader) -> Path:
+    """One run of a Reader without the Judge (for PaddleOCR-VL, the default run)."""
+    return cli.run("--reader", reader)
+
+
+@pytest.fixture(scope="session")
+def judge_without_rereads_run(cli, reader) -> Path:
+    """One run with the Judge on and a threshold of 0, so that nothing is ever re-read."""
+    return cli.run("--reader", reader, "--judge", "--judge-threshold", "0")
+
+
+@pytest.fixture(scope="session")
+def reread_runs(cli, reader, reread_pages) -> list[Path]:
+    """Output folders of two identical runs with --judge-threshold 0.9999, which forces the re-reads."""
+    return cli.runs("--reader", reader, "--judge", "--judge-threshold", REREAD_THRESHOLD, n=2, pages=reread_pages)
+
+
+@pytest.fixture(scope="session")
+def cer_bound(config, sample_pdf, pages) -> float:
+    """The recorded bound for this configuration. It was measured on one document and one page range, so it is only
     applied to those; with another document or other pages set PDF_OCR_CER_BOUND (the check is skipped otherwise)."""
     if "PDF_OCR_CER_BOUND" in os.environ:
         return float(os.environ["PDF_OCR_CER_BOUND"])
@@ -98,57 +211,4 @@ def cer_bound(reader, sample_pdf, pages) -> float:
     if pages != BASELINE["pages"]:
         pytest.skip(f"tests/baseline.json was measured on pages {BASELINE['pages']}, not {pages}; "
                     "set PDF_OCR_CER_BOUND to check the error rate against your own bound")
-    return float(BASELINE["cer_bound"][reader])
-
-
-def run_cli(pdf: Path, out_dir: Path, models_dir: Path, pages: str, reader: str = "minicpm",
-            *extra: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(ROOT / "pdf_ocr.py"), str(pdf), "-o", str(out_dir),
-         "--models-dir", str(models_dir), "--pages", pages, "--reader", reader, *extra],
-        capture_output=True, text=True, cwd=ROOT,
-    )
-
-
-def run_and_keep_stderr(pdf, out, models_dir, pages, reader, *extra) -> Path:
-    done = run_cli(pdf, out, models_dir, pages, reader, *extra)
-    (out / "stderr.txt").write_text(done.stderr, encoding="utf-8")
-    assert done.returncode == 0, f"CLI run ({reader} {' '.join(extra)}) failed:\n{done.stderr[-2000:]}"
-    return out
-
-
-@pytest.fixture(scope="session")
-def cli_runs(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> list[Path]:
-    """Output folders of two identical runs of the CLI on the sample, with the Judge on (its default); shared by
-    all e2e tests of a Reader. The run's stderr is kept as stderr.txt next to the outputs."""
-    return [run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_run{i}"), models_dir, pages, reader)
-            for i in (1, 2)]
-
-
-@pytest.fixture(scope="session")
-def cli_run_no_judge(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> Path:
-    """One run with --no-judge."""
-    return run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_nojudge"), models_dir, pages, reader,
-                               "--no-judge")
-
-
-REREAD_THRESHOLD = "0.9999"  # so high that nearly every Block is re-read
-
-
-@pytest.fixture(scope="session")
-def reread_pages() -> str:
-    return os.environ.get("PDF_OCR_REREAD_PAGES", "4-5")
-
-
-@pytest.fixture(scope="session")
-def reread_runs(sample_pdf, models_dir, reread_pages, reader, tmp_path_factory) -> list[Path]:
-    """Output folders of two identical runs with --judge-threshold 0.9999, which forces the re-reads."""
-    return [run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_reread{i}"), models_dir, reread_pages,
-                                reader, "--judge-threshold", REREAD_THRESHOLD) for i in (1, 2)]
-
-
-@pytest.fixture(scope="session")
-def cli_run_judge_without_rereads(sample_pdf, models_dir, pages, reader, tmp_path_factory) -> Path:
-    """One run with the Judge on and a threshold of 0, so that nothing is ever re-read."""
-    return run_and_keep_stderr(sample_pdf, tmp_path_factory.mktemp(f"{reader}_noreread"), models_dir, pages, reader,
-                               "--judge-threshold", "0")
+    return float(config.record["cer_bound"])

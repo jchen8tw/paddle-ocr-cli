@@ -1,5 +1,5 @@
 """The ink-based re-read of implausibly short Blocks cuts its crops from re-renders of the page. Both users of that
-(--reader paddle --no-judge: pdf_ocr.recover_short_blocks; --reader minicpm --no-judge: InkReread) must send the
+(PaddleOCR-VL without --judge: pdf_ocr.recover_short_blocks; --reader minicpm without --judge: InkReread) must send the
 Reader exactly the crops they always did: the Block's box scaled to the re-render, 4 px of margin, no check on
 whether the render could really be made larger (no GPU, no models; the page and the renders are fakes).
 """
@@ -75,7 +75,7 @@ def paddle_run(monkeypatch, capped_to=None):
     return pipe, notes, calls
 
 
-def test_paddle_no_judge_reads_the_scaled_box_with_four_pixels_of_margin_from_renders_at_1_25_and_0_8(monkeypatch):
+def test_paddle_without_the_judge_reads_the_scaled_box_with_four_pixels_of_margin_from_renders_at_1_25_and_0_8(monkeypatch):
     pipe, notes, calls = paddle_run(monkeypatch)
     assert calls == [DPI * 1.25, DPI * 0.8]
     for image, factor in zip(pipe.images, (1.25, 0.8)):
@@ -83,7 +83,7 @@ def test_paddle_no_judge_reads_the_scaled_box_with_four_pixels_of_margin_from_re
     assert notes == [{"bbox": list(BBOX), "original": "a"}]
 
 
-def test_paddle_no_judge_crops_at_the_size_the_render_really_has_when_the_cap_stopped_it_growing(monkeypatch):
+def test_paddle_without_the_judge_crops_at_the_size_the_render_really_has_when_the_cap_stopped_it_growing(monkeypatch):
     pipe, _, _ = paddle_run(monkeypatch, capped_to=1.0)
     assert np.array_equal(pipe.images[0], expect(1.0, (146, 194), (96, 504)))  # asked 1.25x, got 1x: still read
 
@@ -111,7 +111,7 @@ def minicpm_run(monkeypatch, capped_to=None):
     return reread(request, "a"), bridge, calls
 
 
-def test_minicpm_no_judge_reads_the_same_crops_as_the_paddle_path(monkeypatch):
+def test_minicpm_without_the_judge_reads_the_same_crops_as_the_paddle_path(monkeypatch):
     better, bridge, calls = minicpm_run(monkeypatch)
     assert better is not None and calls == [DPI * 1.25, DPI * 0.8]
     for (image, label, limit), factor in zip(bridge.crops, (1.25, 0.8)):
@@ -119,12 +119,12 @@ def test_minicpm_no_judge_reads_the_same_crops_as_the_paddle_path(monkeypatch):
         assert (label, limit) == ("text", 512)
 
 
-def test_minicpm_no_judge_crops_at_the_size_the_render_really_has_when_the_cap_stopped_it_growing(monkeypatch):
+def test_minicpm_without_the_judge_crops_at_the_size_the_render_really_has_when_the_cap_stopped_it_growing(monkeypatch):
     _, bridge, _ = minicpm_run(monkeypatch, capped_to=1.0)
     assert np.array_equal(bridge.crops[0][0], expect(1.0, (146, 194), (96, 504)))
 
 
-def test_minicpm_no_judge_skips_a_block_that_is_not_text_or_has_no_box(monkeypatch):
+def test_minicpm_without_the_judge_skips_a_block_that_is_not_text_or_has_no_box(monkeypatch):
     _, bridge, calls = minicpm_run(monkeypatch)
     ink = pdf_ocr.InkReread()
     set_page(ink, object(), page_image())
