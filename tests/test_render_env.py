@@ -132,3 +132,43 @@ def test_the_font_cache_lives_in_the_user_cache_not_in_the_run_dir(monkeypatch, 
     monkeypatch.delenv("XDG_CACHE_HOME")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert render_env.font_cache_dir() == tmp_path / "home" / ".cache" / "pdf_ocr" / "fontconfig"
+
+
+# ------------------------------------------------------------------ the per-process fontconfig folder
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_fontconfig_folder_whose_worker_is_gone_is_removed_and_a_live_ones_is_not(tmp_path):
+    import os
+
+    gone = tmp_path / f"pdf_ocr_fontconfig_{_dead_pid()}_abc123"
+    live = tmp_path / f"pdf_ocr_fontconfig_{os.getpid()}_def456"
+    other = tmp_path / "some_other_folder"
+    unknown_owner = tmp_path / "pdf_ocr_fontconfig_old1234"  # made by a version that did not name its owner
+    for d in (gone, live, other, unknown_owner):
+        (d / "noto-sans-cjk").mkdir(parents=True)
+        (d / "fonts.conf").write_text("x")
+    render_env.remove_stale_fontconfig_dirs(tmp_path)
+    assert not gone.exists()
+    assert live.exists() and other.exists() and unknown_owner.exists()
+
+
+def test_a_new_fontconfig_folder_names_its_owner_so_that_a_later_start_can_tell_it_is_stale(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(render_env.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(render_env, "noto_sans_cjk_files", lambda out: [Path("/x/NotoSansCJK.ttc")])
+    monkeypatch.setattr(render_env, "default_fc_list", lambda: "")
+    monkeypatch.setattr(render_env, "write_fontconfig", lambda work, *a: Path(work) / "fonts.conf")
+    monkeypatch.setenv("FONTCONFIG_FILE", "unset")
+    render_env.prepare_environment()
+    (made,) = tmp_path.iterdir()
+    assert made.name.startswith(f"pdf_ocr_fontconfig_{os.getpid()}_")
+    assert os.environ["FONTCONFIG_FILE"] == str(made / "fonts.conf")

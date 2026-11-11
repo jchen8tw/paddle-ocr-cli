@@ -131,17 +131,47 @@ def write_fontconfig(work_dir: Path, droid_dir: Path, noto_files: list[Path], ca
     return conf
 
 
+FONTCONFIG_PREFIX = "pdf_ocr_fontconfig_"
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # somebody else's live process
+    return True
+
+
+def remove_stale_fontconfig_dirs(root: Path | None = None, *, pid_exists: Callable[[int], bool] = _pid_exists) -> None:
+    """Remove the private fontconfig folders of workers that no longer exist. A worker removes its own folder at
+    exit, but the client kills a worker that timed out (SIGKILL), which runs no exit handler. The owner's pid is in
+    the folder's name (`pdf_ocr_fontconfig_<pid>_...`); a folder of a live process, and one whose name carries no
+    pid, are left alone."""
+    root = Path(root or tempfile.gettempdir())
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for d in entries:
+        m = re.fullmatch(re.escape(FONTCONFIG_PREFIX) + r"(\d+)_.+", d.name)
+        if m and d.is_dir() and not pid_exists(int(m.group(1))):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def prepare_environment() -> None:
     """Point the renderer's Chromium at the private fontconfig. Call once, before the first render.
 
-    The file and the links to Noto live in a folder of this process alone (removed at exit), so two runs, or a
+    The file and the links to Noto live in a folder of this process alone (removed at exit, or by the next worker's start if this one is killed), so two runs, or a
     restarted worker, can never find each other's half-written files; only fontconfig's cache is shared and kept."""
     import atexit
 
     noto = noto_sans_cjk_files(default_fc_list())
     if not noto:  # setup_problems() reports this first; never render with the wrong font silently
         raise RuntimeError("Noto Sans CJK is not installed")
-    work = Path(tempfile.mkdtemp(prefix="pdf_ocr_fontconfig_"))
+    remove_stale_fontconfig_dirs()  # what workers killed on a timeout left behind
+    work = Path(tempfile.mkdtemp(prefix=f"{FONTCONFIG_PREFIX}{os.getpid()}_"))
     atexit.register(shutil.rmtree, work, ignore_errors=True)
     os.environ["FONTCONFIG_FILE"] = str(write_fontconfig(work, DROID_DIR, noto, font_cache_dir()))
 
