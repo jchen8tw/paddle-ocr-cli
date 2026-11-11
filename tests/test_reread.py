@@ -363,3 +363,29 @@ def test_threshold_zero_never_re_reads_even_when_the_first_reading_is_unusable(v
     assert reader.rounds == [1] and len(judge.calls) == 1
     assert out.readings is None and out.stop_reason is None
     assert (out.text, out.score, out.verdict) == (first(), None, verdict)
+
+
+# ------------------------------------------------------------------ a Reader that answers for too few Blocks
+
+class ShortReader(ScriptedReader):
+    """Drops the last Block's answer in the given round."""
+
+    def __init__(self, short_round, **kw):
+        super().__init__(**kw)
+        self.short_round = short_round
+
+    def read(self, requests, step, seeds):
+        out = super().read(requests, step, seeds)
+        return out[:-1] if step.round == self.short_round else out
+
+
+def test_a_first_round_with_fewer_answers_than_blocks_fails_instead_of_dropping_blocks():
+    with pytest.raises(RuntimeError, match="1 of 2"):
+        read_blocks([req("a"), req("b")], ShortReader(1), ScriptedJudge(), settings())
+
+
+def test_a_re_read_round_with_fewer_answers_than_blocks_is_a_reader_error_for_those_blocks_only():
+    a, b = read_blocks([req("a"), req("b")], ShortReader(2), ScriptedJudge(), settings())
+    assert (a.stop_reason, b.stop_reason) == ("reader_error", "reader_error")
+    assert "1 of 2" in a.stop_detail
+    assert (a.text, b.text) == (first("a"), first("b"))  # the first Readings are kept

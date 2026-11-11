@@ -214,6 +214,8 @@ def read_blocks(requests: list[BlockRequest], reader: Reader, judge: Judge | Non
     `requests`."""
     first_step = settings.schedule[0]
     raws = reader.read(requests, first_step, [None] * len(requests))
+    if len(raws) != len(requests):  # zip() would silently drop the Blocks without an answer
+        raise RuntimeError(f"the Reader answered for {len(raws)} of {len(requests)} Blocks")
     results: list[BlockResult] = []
     blocks: list[_Block] = []
     items: list[JudgeItem] = []
@@ -305,6 +307,10 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
         seeds = [derive_seed(settings.doc_hash, settings.page, b.request.seed_id, step.round)
                  if step.decode == "temperature" else None for b in active]
         answers = reader.read([b.request for b in active], step, seeds)
+        if len(answers) != len(active):  # no telling which Block an answer belongs to: none of them is used
+            for b in active:
+                b.stop = ("reader_error", f"round {step.round}: the Reader answered for {len(answers)} of {len(active)} Blocks")
+            continue
         items: list[JudgeItem] = []
         owners: list[tuple[_Block, Reading]] = []
         for b, texts in zip(active, answers):
