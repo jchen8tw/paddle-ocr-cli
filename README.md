@@ -274,7 +274,7 @@ PaddleOCR-VL is right or better in all 10:
   correctly by PaddleOCR-VL. The same 躉 weakness shows on the brochure below.
 - **MiniCPM writes symbols as LaTeX.** On page 38 `≧` came out as `$\geq$` or `\geq` in three text Blocks (16
   errors against PaddleOCR-VL's 9, which also wrapped two of them in `$`). The official SDK has a LaTeX repair
-  for this; it is not ported (a follow-up issue).
+  for this; it is not ported (issue #7).
 - **MiniCPM wins on Simplified drift.** PaddleOCR-VL wrote 16 Simplified characters (资 别 项) into the
   Traditional text, in 16 Blocks, all fixed by `--script auto`; without that repair they would be 16 more errors.
   MiniCPM wrote none in these runs (0 repairs), and 1 at 144 DPI.
@@ -384,6 +384,11 @@ One document, one language, 21 of its 75 pages, one GPU. The table characters (6
 for both Readers, so the comparison rests on about 5,000 characters and 12 wrong Blocks. The original sample may
 rank the Readers differently, and a scanned document was not measured at all. Table structure, merged cells and
 reading order are not scored by `ocr_eval.py`. Scores are not promised to be the same on another GPU.
+
+Follow-ups these measurements suggest are filed as issues, not done here: the LaTeX repair (#7), best-of-N or
+disagreement flags across Readers (#8), the re-read clearing a wrong Block's flag (#9), per-label thresholds (#10),
+re-measuring the Reader choice on more documents (#11), scoring table structure and formulas (#12), the dropped
+footnote phrase on page 52 (#13) and the brochure's heading and picture text (#14).
 
 ## Design choices
 
