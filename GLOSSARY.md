@@ -33,8 +33,8 @@ _Avoid_: retry, re-OCR, recovery
 
 **Round**:
 One step of the re-read schedule: greedy at 1x (the first Reading), greedy at 1.25x, 4 samples at temperature 0.3,
-4 samples at temperature 0.7. A round runs for a Block only while its best Score is below the threshold, and a Reader
-skips the rounds it cannot do.
+4 samples at temperature 0.7. A round runs for a Block only while its best Score is below the threshold and the round
+before it gave a text not read before; a Reader skips the rounds it cannot do.
 _Avoid_: pass, attempt, stage
 
 **Judge**:
@@ -50,6 +50,11 @@ What happened when the Judge was asked to rate one Reading. Only `scored` carrie
 verdicts say the Reading was unusable (`precheck_reject`, `render_error`, `missing_original_image`) or that
 scoring never happened (`encode_error`, `forward_error`).
 _Avoid_: status, result
+
+**Flagged**:
+A judged Block a person should check: its first Reading scored below the threshold or could not be scored.
+Re-reading never clears it.
+_Avoid_: below threshold (the final Score can be above it), low-confidence
 
 ### Runs
 
