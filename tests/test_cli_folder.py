@@ -275,6 +275,67 @@ def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path
     assert "<!-- page 1 -->" not in (tmp_path / "out" / "a" / "a.md").read_text(encoding="utf-8")
 
 
+# --- a worker crash fails the page it was on, and the Run goes on with a fresh worker ---------------------------------
+
+def test_a_worker_crash_on_the_last_page_of_a_document_fails_only_that_page_and_the_next_document_is_transcribed(
+        tmp_path, capsys, monkeypatch, loaded):
+    folder = folder_of(tmp_path, "a.pdf", pages=2)
+    blank_pdf(folder / "b.pdf")
+    loaded.client.crash_on_page = 2  # the last page of a.pdf loses its worker on its first read
+    out = tmp_path / "out"
+    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
+    a, b = read_json(out / "a" / "a.json"), read_json(out / "b" / "b.json")
+    assert a["source"]["pages_failed"] == [2]
+    first, crashed = a["pages"]
+    assert first["blocks"] and "error" not in first  # the page before the crash is fine
+    assert crashed["blocks"] == [] and "exited with code 3" in crashed["error"]
+    assert b["source"]["pages_failed"] == [] and b["pages"][0]["blocks"]  # b.pdf got a fresh worker
+    assert loaded.client.restarts == 1
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[-2:] == ["2 Documents: 2 written, 0 skipped, 0 failed",
+                          "  a.pdf: page 2 failed (recorded in its JSON)"]
+
+    Loaded(monkeypatch, tmp_path / "alone")  # nothing of the crash reached b.pdf: it equals a Run on b.pdf alone
+    assert pdf_ocr.main([str(folder / "b.pdf"), "-o", str(tmp_path / "alone-out"), "--judge-threshold", "0.98"]) == 0
+    alone = read_json(tmp_path / "alone-out" / "b.json")
+    for doc in (b, alone):
+        del doc["elapsed_seconds"]
+    assert b == alone
+    assert (out / "b" / "b.md").read_bytes() == (tmp_path / "alone-out" / "b.md").read_bytes()
+
+
+# --- the output root inside the folder: what a Run wrote is never taken for input -------------------------------------
+
+def test_an_output_root_inside_the_folder_is_never_picked_up_as_input_by_the_next_run(tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "b.pdf", "sub/a.pdf")
+    argv = [str(folder), "-o", str(folder / "out"), "--judge-threshold", "0.98"]
+    assert pdf_ocr.main(argv) == 0
+    assert (folder / "out" / "sub" / "a" / "a.json").is_file()  # the output is inside the folder
+    before = snapshot(folder / "out")
+    capsys.readouterr()
+    assert pdf_ocr.main(argv) == 0
+    assert capsys.readouterr().err.splitlines() == [
+        f"found 2 Documents in {folder} (2 already done)",
+        "[1/2] b.pdf skipped: already done",
+        "[2/2] sub/a.pdf skipped: already done",
+        "2 Documents: 0 written, 2 skipped, 0 failed"]
+    assert snapshot(folder / "out") == before and (loaded.checks, loaded.loads) == (1, 1)
+
+
+def test_the_default_output_root_when_the_folder_is_the_working_directory_is_never_picked_up_as_input(
+        tmp_path, capsys, monkeypatch, loaded):
+    folder = folder_of(tmp_path, "b.pdf", "sub/a.pdf")
+    monkeypatch.chdir(folder)
+    assert pdf_ocr.main([".", "--judge-threshold", "0.98"]) == 0
+    assert (folder / "output" / "docs" / "sub" / "a" / "a.json").is_file()  # output/<name of the current directory>/
+    capsys.readouterr()
+    assert pdf_ocr.main([".", "--judge-threshold", "0.98"]) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == "found 2 Documents in . (2 already done)"
+    assert lines[-1] == "2 Documents: 0 written, 2 skipped, 0 failed"
+    assert (loaded.checks, loaded.loads) == (1, 1)
+
+
 # --- the PDFs a Run opened are closed when it ends -------------------------------------------------------------------
 
 @pytest.fixture

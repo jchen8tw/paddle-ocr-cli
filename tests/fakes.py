@@ -17,13 +17,22 @@ class FakeClient:
         self.scores, self.fail_score, self.default_score = scores or {}, fail_score, default_score  # scores: text -> (verdict, score)
         self.score_calls, self.events = [], []
         self.decodes, self.images = [], []
-        self.started = 0
+        self.started = 0  # calls of ensure_started: one per page the bridge reads
+        self.crash_on_page = None  # the page (from 1, over the whole Run) that loses its worker on its first read
+        self.worker_alive, self.restarts = True, 0
 
     def ensure_started(self):
         self.started += 1
+        if not self.worker_alive:  # a worker that crashed on an earlier page is started again
+            self.worker_alive, self.restarts = True, self.restarts + 1
 
     def read(self, image, prompt, max_new_tokens, *, decode=None, timeout=None):
         assert Path(image).is_file(), "the crop must exist on disk while the worker reads it"
+        if self.started == self.crash_on_page and self.worker_alive:
+            self.worker_alive = False
+            raise WorkerError("the worker stopped (exited with code 3)")
+        if not self.worker_alive:
+            raise WorkerError("the worker is not running")
         self.calls.append((prompt, max_new_tokens))
         self.decodes.append(decode)
         self.images.append(Path(image).name)
