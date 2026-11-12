@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import pytest
 
 import pdf_ocr
-from fakes import INK_BOX, blank_pdf, engine_for, inked_pdf
+from fakes import INK_BOX, FakeClient, blank_pdf, engine_for, inked_pdf
+from worker_client import WorkerError
 
 # (options, Reader folder in the JSON, Judge folder in the JSON or None, whether the setup starts the worker)
 SETUPS = [
@@ -183,3 +184,71 @@ def test_with_minicpm_alone_a_short_block_over_a_line_of_ink_is_re_read_by_the_w
     (block,) = done.blocks
     assert (block["content_before_reread"], block["content"]) == ("a", LONGER)
     assert re.search(r"re-read 1 short block\(s\)", done.stderr)
+
+
+# --- a Re-read that fails keeps the first Reading; a first read that fails fails the page --------------------------------
+
+OUT_OF_MEMORY = "CUDA error: out of memory"
+
+
+class WorkerThatFailsReReads(FakeClient):
+    """The first Reading of a Block succeeds; every read after it (the Re-reads) runs out of memory."""
+
+    def read(self, image, prompt, max_new_tokens, **kw):
+        if self.calls:
+            raise WorkerError(f"worker error: {OUT_OF_MEMORY}")
+        return super().read(image, prompt, max_new_tokens, **kw)
+
+
+def engine_whose_reread_runs_out_of_memory(options, tmp_path):
+    """An Engine for `options` whose one Block reads as "a" over a line of ink, and whose Re-read of it fails."""
+    if "minicpm" in options:
+        engine, fakes = engine_for(options, tmp_path, worker=WorkerThatFailsReReads())
+    else:
+        engine, fakes = engine_for(options, tmp_path)
+        fakes.pipe.reread_fails = RuntimeError(OUT_OF_MEMORY)
+    short_block_over_ink(fakes)
+    return engine
+
+
+@pytest.mark.parametrize("options", [pytest.param([], id="paddleocr-vl"),
+                                     pytest.param(["--reader", "minicpm"], id="minicpm")])
+def test_a_re_read_that_runs_out_of_memory_keeps_the_first_reading_and_does_not_fail_the_page(
+        tmp_path, capsys, options):
+    engine = engine_whose_reread_runs_out_of_memory(options, tmp_path / "engine")
+    done = transcribe(engine, options, inked_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert done.errors == {} and done.json["source"]["pages_failed"] == []
+    (block,) = done.blocks
+    assert block["content"] == "a" and "content_before_reread" not in block
+    assert "a" in done.markdown.splitlines() and "failed" not in done.markdown
+    warnings = [ln for ln in done.stderr.splitlines() if ln.startswith("warning:")]
+    assert len(warnings) == 1
+    assert "page 1" in warnings[0] and str(INK_BOX) in warnings[0] and OUT_OF_MEMORY in warnings[0]
+    assert "keeping its first reading" in warnings[0]
+    assert "hint:" not in done.stderr  # not a page failure, so no advice on what to do about one
+    assert "short block" not in done.stderr and done.stderr.splitlines()[-1].startswith("wrote ")
+
+
+def test_a_re_read_that_fails_does_not_stop_the_re_read_of_the_next_block(tmp_path, capsys):
+    engine, fakes = engine_for([], tmp_path / "engine")
+    fakes.pipe.blocks = [("text", INK_BOX), ("text", INK_BOX)]  # both over the one line of ink
+    fakes.pipe.reread_fails = RuntimeError(OUT_OF_MEMORY)
+    fakes.read_as("a")
+    done = transcribe(engine, [], inked_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert done.errors == {} and [b["content"] for b in done.blocks] == ["a", "a"]
+    assert done.stderr.count("warning:") == 2  # each Block's Re-read was tried and each failure reported
+
+
+def test_without_options_a_page_whose_first_read_fails_is_a_failed_page_and_the_rest_of_the_document_is_still_written(
+        tmp_path, capsys):
+    engine, fakes = engine_for([], tmp_path / "engine")
+    fakes.read_as("some words")
+    fakes.pipe.read_fails = {1: RuntimeError(OUT_OF_MEMORY)}
+    done = transcribe(engine, [], blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", capsys)
+    assert list(done.errors) == [0] and done.json["source"]["pages_failed"] == [1]
+    assert f"[  1/2] page 1: FAILED RuntimeError: {OUT_OF_MEMORY}" in done.stderr
+    assert "hint: the GPU ran out of memory" in done.stderr
+    first, second = done.json["pages"]
+    assert first["blocks"] == [] and OUT_OF_MEMORY in first["error"]
+    assert [b["content"] for b in second["blocks"]] == ["some words", "some words"]
+    assert "<!-- page 1 failed:" in done.markdown and done.markdown.count("some words") == 2
