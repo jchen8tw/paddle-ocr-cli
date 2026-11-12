@@ -10,6 +10,7 @@ import pytest
 
 import pdf_ocr
 from fakes import INK_BOX, SETUPS, blank_pdf, engine_for, inked_pdf
+from worker_client import WorkerError
 
 OPTIONS = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # these tests need the Judge's counters
 TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"
@@ -187,3 +188,125 @@ def test_a_judged_block_whose_box_the_pipeline_moved_after_reading_has_no_score_
     (warning,) = warnings  # a chart is never judged, so it has no Score to miss
     assert warning.startswith("warning: page 2: the text Block at (20, 20, 36, 30) has no Score")
     assert err.index(warning) < next(i for i, ln in enumerate(err) if ln.startswith("[  2/2] page 2:"))
+
+
+# --- what the Engine tells about a whole Document: the memory hint and the `engine` section ---------------------------
+
+OUT_OF_MEMORY = "CUDA error: out of memory"
+WAYS_OUT = {
+    "paddleocr-vl": "try --reader minicpm, which needs less GPU memory",
+    "paddleocr-vl+judge": "PaddleOCR-VL with the Judge is the tightest combination",
+    "minicpm": "MiniCPM-OCR-1.0 without the Judge is the smallest configuration",
+    "minicpm+judge": "must fit side by side; close other GPU programs, or run without --judge",
+}
+
+
+def run(engine, pdf, out, options, capsys):
+    """Transcribe a Document. Returns its JSON and its lines on stderr."""
+    capsys.readouterr()
+    document = pdf_ocr.open_document(pdf, None)
+    try:
+        pdf_ocr.transcribe_document(engine, pdf_ocr.parse_args([str(pdf), "--no-csv", *options]), document, out)
+    finally:
+        document.close()
+    return json.loads((out / f"{pdf.stem}.json").read_text(encoding="utf-8")), capsys.readouterr().err.splitlines()
+
+
+def hint(err):
+    """The memory hint, or None."""
+    assert err[-1].startswith("wrote ")
+    hints = [ln for ln in err if ln.startswith("hint:")]
+    assert hints in ([], [err[-2]])
+    return hints[0] if hints else None
+
+
+def the_first_page_fails(pipe, error):
+    read, calls = pipe.predict, []
+
+    def predict(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise error
+        return read(*args, **kwargs)
+
+    pipe.predict = predict
+
+
+def every_read_after_the_first_runs_out_of_memory(fakes):
+    reader, name = (fakes.paddle, "predict") if fakes.paddle is not None else (fakes.worker, "read")
+    read, calls = getattr(reader, name), []
+
+    def read_or_fail(*args, **kwargs):
+        calls.append(args)
+        if len(calls) > 1:
+            raise RuntimeError(OUT_OF_MEMORY)
+        return read(*args, **kwargs)
+
+    setattr(reader, name, read_or_fail)
+
+
+@every_setup
+def test_a_page_that_runs_out_of_memory_prints_the_memory_hint_of_the_setup_before_the_wrote_line(
+        tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    the_first_page_fails(fakes.pipe, RuntimeError(OUT_OF_MEMORY))
+    doc, err = run(engine, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", setup.options, capsys)
+    assert doc["source"]["pages_failed"] == [1]
+    assert hint(err).startswith("hint: the GPU ran out of memory: ") and WAYS_OUT[setup.id] in hint(err)
+
+
+@judged_setups
+def test_a_verdict_that_says_the_gpu_ran_out_of_memory_prints_the_memory_hint_of_the_setup(tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    fakes.worker.fail_score = WorkerError(f"worker error: {OUT_OF_MEMORY}")
+    doc, err = run(engine, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", setup.options, capsys)
+    assert doc["source"]["pages_failed"] == []
+    blocks = doc["pages"][0]["blocks"]
+    assert all(b["verdict"] == "forward_error" and OUT_OF_MEMORY in b["verdict_detail"] for b in blocks)
+    assert WAYS_OUT[setup.id] in hint(err)
+
+
+@judged_setups
+def test_a_re_read_round_that_runs_out_of_memory_prints_the_memory_hint_of_the_setup(tmp_path, capsys, setup):
+    options = [*setup.options, "--judge-threshold", "0.98"]
+    engine, fakes = engine_for(options, tmp_path / "engine")
+    fakes.pipe.blocks = [("text", (0, 0, 16, 8))]
+    every_read_after_the_first_runs_out_of_memory(fakes)
+    doc, err = run(engine, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", options, capsys)
+    (block,) = doc["pages"][0]["blocks"]
+    assert block["stop_reason"] == "reader_error" and OUT_OF_MEMORY in block["stop_detail"]
+    assert WAYS_OUT[setup.id] in hint(err)
+
+
+@every_setup
+def test_a_page_and_verdicts_that_fail_for_another_reason_print_no_memory_hint(tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    fakes.read_as("some words")
+    if setup.judge:
+        fakes.worker.scores = {"some words": ("render_error", None)}
+    the_first_page_fails(fakes.pipe, ValueError("bad page"))
+    doc, err = run(engine, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", setup.options, capsys)
+    assert doc["source"]["pages_failed"] == [1]
+    assert {b.get("verdict") for b in doc["pages"][1]["blocks"]} == ({"render_error"} if setup.judge else {None})
+    assert hint(err) is None
+
+
+@every_setup
+def test_a_document_after_one_that_ran_out_of_memory_in_the_same_engine_gets_no_memory_hint(tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    the_first_page_fails(fakes.pipe, RuntimeError(OUT_OF_MEMORY))
+    _, first = run(engine, blank_pdf(tmp_path / "first.pdf"), tmp_path / "a", setup.options, capsys)
+    _, second = run(engine, blank_pdf(tmp_path / "second.pdf"), tmp_path / "b", setup.options, capsys)
+    assert hint(first) is not None and hint(second) is None
+
+
+@every_setup
+def test_the_engine_section_names_the_models_and_the_libraries_and_the_device_in_their_order(tmp_path, setup):
+    engine, _ = engine_for(setup.options, tmp_path / "engine")
+    doc, _ = transcribe(engine, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", setup.options)
+    paddleocr_vl = "minicpm" not in setup.options
+    assert list(doc["engine"]) == [
+        "layout_model", "reader", *(["pipeline", "vl_model"] if paddleocr_vl else []), "paddleocr", "paddlex",
+        *(["judge"] if setup.judge else []), *(["torch"] if setup.worker else []), "device"]
+    assert (doc["engine"]["reader"], doc["engine"].get("judge"), doc["engine"]["device"]) == (
+        setup.reader, setup.judge, "cpu")
