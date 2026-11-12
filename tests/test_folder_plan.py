@@ -25,7 +25,7 @@ def tree(base: Path, *names: str) -> Path:
 
 def plan(folder, output_root=None, *argv):
     args = pdf_ocr.parse_args([str(folder), *argv])
-    return pdf_ocr.plan_run(Path(folder), output_root, args)
+    return pdf_ocr.plan_run(Path(folder), output_root, pdf_ocr.EngineSpec.from_options(args), args)
 
 
 def found(documents) -> list[str]:
@@ -185,7 +185,7 @@ def test_planning_needs_no_paddle(tmp_path):
     folder = tree(tmp_path / "docs", "a.pdf", "sub/b.pdf")
     code = ("import sys, pdf_ocr; from pathlib import Path\n"
             "args = pdf_ocr.parse_args(sys.argv[1:2])\n"
-            "assert len(pdf_ocr.plan_run(Path(sys.argv[1]), None, args)) == 2\n"
+            "assert len(pdf_ocr.plan_run(Path(sys.argv[1]), None, pdf_ocr.EngineSpec.from_options(args), args)) == 2\n"
             "assert 'paddle' not in sys.modules and 'torch' not in sys.modules")
     done = subprocess.run([sys.executable, "-c", code, str(folder)], cwd=ROOT, capture_output=True, text=True,
                           env={**os.environ, "PYTHONPATH": str(ROOT)})

@@ -384,23 +384,15 @@ def start_worker(spec: EngineSpec, models_dir: Path):
         sys.exit(f"error: {e}")
 
 
-def engine_models(args) -> dict:
-    """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
-    from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
-    (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
-    return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
-            **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
+def run_fingerprint(spec: EngineSpec, args) -> document_record.Fingerprint:
+    return document_record.fingerprint(args, spec.models, spec.supports)
 
 
-def run_fingerprint(args) -> document_record.Fingerprint:
-    return document_record.fingerprint(args, engine_models(args), reader_bridge.reader_supports(args.reader))
-
-
-def engine_info(args, device: str, ready: dict | None) -> dict:
+def engine_info(spec: EngineSpec, device: str, ready: dict | None) -> dict:
     """The JSON `engine` section: the Layout model, the Reader and the Judge, with the library versions."""
-    models = engine_models(args)
+    models = spec.models
     engine = {"layout_model": models["layout_model"], "reader": models["reader"]}
-    if args.reader == "paddle":
+    if spec.reader == "paddle":
         engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
     engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
     if "judge" in models:
@@ -571,14 +563,14 @@ def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
     return best_text if best_text is not None and best_n > 1.5 * n else None
 
 
-def recover_short_blocks(pipe, page, res, img, scale: float, args, page_no: int) -> list[dict]:
+def recover_short_blocks(pipe, page, res, img, scale: float, spec: EngineSpec, page_no: int) -> list[dict]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
     differently scaled renders and keep the result only if it is clearly longer and plausible. When the re-read of a
     Block fails (the GPU ran out of memory, say) the Block keeps its first Reading and the page goes on, as in the
     bridge (`page_no` is the page's number from 1, for the warning).
     (PaddleOCR-VL without --judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
-    renders = PageRenders(page, img, scale, args.dpi)
+    renders = PageRenders(page, img, scale, spec.dpi)
     for b in res["parsing_res_list"]:
         if b.label not in TEXT_LABELS:
             continue
@@ -590,7 +582,7 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args, page_no: int)
         def reread_at_scale(factor, bbox=bbox):
             r = renders.region(bbox, factor)
             out = pipe.predict(r, use_layout_detection=False, prompt_label="ocr",
-                               max_new_tokens=args.max_new_tokens, use_queues=False)[0]
+                               max_new_tokens=spec.max_new_tokens, use_queues=False)[0]
             return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
 
         try:
@@ -831,12 +823,12 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
-def memory_hint(args, errors: dict, outcomes: dict) -> str | None:
+def memory_hint(spec: EngineSpec, errors: dict, outcomes: dict) -> str | None:
     """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
     texts = [*errors.values(), *(f"{o.verdict_detail or ''} {o.stop_detail or ''}" for o in outcomes.values())]
     if not any("out of memory" in t.lower() for t in texts):
         return None
-    return f"hint: the GPU ran out of memory: {MEMORY_WAYS_OUT[args.reader, args.judge]}"
+    return f"hint: the GPU ran out of memory: {spec.memory_advice}"
 
 
 def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
@@ -1099,7 +1091,7 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                         + "\n  ".join(problems))
 
 
-def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
+def plan_run(folder: Path, output_root: Path | None, spec: EngineSpec, args) -> list[PlannedDocument]:
     """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
     with the folder it writes to and whether it is Already done (`document_record.why_not_done`, under one
     Fingerprint for the whole Run; never with --force). `output_root` is `-o`, or None for output/<name of the
@@ -1112,7 +1104,7 @@ def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocume
     refuse_collisions(documents)
     if args.force:
         return [replace(d, reason="--force") for d in documents]
-    fingerprint = run_fingerprint(args)
+    fingerprint = run_fingerprint(spec, args)
     reasons = [document_record.why_not_done(d.path, d.out_dir, fingerprint) for d in documents]
     return [replace(d, done=reason is None, reason=reason or "") for d, reason in zip(documents, reasons)]
 
@@ -1212,7 +1204,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     doc_hash = document_record.sha256(document.path)
     engine.begin_document(doc_hash)
-    pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
+    spec, pipe, bridge, ink, device = engine.spec, engine.pipe, engine.bridge, engine.ink, engine.device
 
     ok: list[tuple[int, object]] = []
     meta: dict[int, dict] = {}
@@ -1221,25 +1213,25 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
         t0 = time.time()
         page = pdf[idx]
         try:
-            img, scale = render_page(page, args.dpi)
+            img, scale = render_page(page, spec.dpi)
             if bridge is not None:
                 bridge.current_page = idx
-                bridge.page_source = PageRenders(page, img, scale, args.dpi)
+                bridge.page_source = PageRenders(page, img, scale, spec.dpi)
                 ink.set_page(bridge.page_source)
-            res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
+            res = pipe.predict(img, max_new_tokens=spec.max_new_tokens, use_queues=False)[0]
             recovered = []
-            if not args.judge and not args.no_recover and args.reader == "paddle":
-                recovered = recover_short_blocks(pipe, page, res, img, scale, args, idx + 1)  # PaddleOCR-VL, as before
+            if spec.ink_reread and spec.adapter is Adapter.PADDLEOCR_VL_ALONE:
+                recovered = recover_short_blocks(pipe, page, res, img, scale, spec, idx + 1)
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
-            if bridge is not None and args.judge:
+            if bridge is not None and spec.judge:
                 for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
                     print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
                           "Reader hook, or its box changed after reading)", file=sys.stderr)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
             print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
-                            summary=bridge.page_summary(idx) if bridge and args.judge else None,
+                            summary=bridge.page_summary(idx) if bridge and spec.judge else None,
                             recovered=n_reread), file=sys.stderr)
         except Exception as e:  # keep going; the failure is recorded in the JSON and the exit code
             errors[idx] = f"{type(e).__name__}: {e}"
@@ -1283,16 +1275,16 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     tally = document_record.EngineTally()
     if bridge is not None:
         judge = ({**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}
-                 if args.judge else None)
+                 if spec.judge else None)
         tally = document_record.EngineTally(bridge.repetition_cuts, bridge.symbols_unwrapped, judge)
     transcription = document_record.Transcription(
         sha256=doc_hash, page_count=total, pages_processed=[i + 1 for i in indices],
         pages_failed=[i + 1 for i in sorted(errors)], tables_with_line_breaks_fixed=tables_fixed,
         latex_symbols_unwrapped=unwrapped, script_repair=script_info, restructuring_failed=restructuring_failed,
         csv_tables=csv_info, elapsed_seconds=time.time() - t_start, pages=[pages[i] for i in sorted(pages)])
-    json_path = document_record.write(document.path, out_dir, run_fingerprint(args),
-                                      engine_info(args, device, engine.ready), tally, transcription)
-    if hint := memory_hint(args, errors, outcomes):
+    json_path = document_record.write(document.path, out_dir, run_fingerprint(spec, args),
+                                      engine_info(spec, device, engine.ready), tally, transcription)
+    if hint := memory_hint(spec, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
@@ -1326,7 +1318,7 @@ def transcribe_folder(spec: EngineSpec, args) -> int:
     import traceback
 
     try:
-        plan = plan_run(args.pdf, args.output_dir, args)
+        plan = plan_run(args.pdf, args.output_dir, spec, args)
     except PlanError as e:
         sys.exit(f"error: {e}")
     labels = [f"[{i}/{len(plan)}] {planned.relative_posix}" for i, planned in enumerate(plan, 1)]

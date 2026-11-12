@@ -72,14 +72,14 @@ def test_the_main_projects_uv_environment_does_not_leak_into_the_worker(monkeypa
 
 def test_engine_names_the_layout_model_and_the_reader_with_torch_and_transformers_for_minicpm():
     ready = {"reader": "MiniCPM-OCR-1.0", "versions": {"torch": "2.15.0+cu132", "transformers": "5.22.2"}}
-    e = pdf_ocr.engine_info(args("--reader", "minicpm"), "gpu:0", ready)
+    e = pdf_ocr.engine_info(spec("--reader", "minicpm"), "gpu:0", ready)
     assert e["layout_model"] == "PP-DocLayoutV3" and e["reader"] == "MiniCPM-OCR-1.0"
     assert e["torch"] == "2.15.0+cu132" and e["transformers"] == "5.22.2" and e["device"] == "gpu:0"
     assert "vl_model" not in e
 
 
 def test_engine_for_the_paddle_reader_keeps_todays_keys_and_adds_the_reader():
-    e = pdf_ocr.engine_info(args(), "gpu:0", None)
+    e = pdf_ocr.engine_info(spec(), "gpu:0", None)
     assert e["pipeline"] == "PaddleOCR-VL-1.6" and e["vl_model"] == "PaddleOCR-VL-1.6"
     assert e["reader"] == "PaddleOCR-VL-1.6" and e["layout_model"] == "PP-DocLayoutV3"
     assert "torch" not in e
