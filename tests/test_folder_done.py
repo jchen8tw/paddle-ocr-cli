@@ -1,7 +1,8 @@
 """Planning a folder Run, the "already done" half: which Documents an earlier Run has already written, judged from the
 JSON that is on disk and the options of this Run. Pure file-system work, no model, no GPU.
 
-The JSONs under test are written by the real post-processing (a fake Engine reads the pages), then damaged.
+The JSONs under test are written by the real post-processing (an Engine built by `fakes.engine_for` reads the pages
+with the PaddleX pipe and the worker faked), then damaged.
 """
 import json
 from pathlib import Path
@@ -9,25 +10,26 @@ from pathlib import Path
 import pytest
 
 import pdf_ocr
-from fakes import ENGINE_ARGV, blank_pdf, engine_with
+from fakes import SETUPS, blank_pdf, engine_for
 
-JUDGE_OFF = ["--reader", "minicpm", "--no-judge"]  # the fake Engine's Reader without the Judge: a threshold would be a usage error
+JUDGE_ON = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # the Run these tests start from
+JUDGE_OFF = ["--reader", "minicpm", "--no-judge"]  # the same Reader without the Judge: a threshold would be a usage error
 
 
-def options(folder, out, *argv, base=ENGINE_ARGV):
+def options(folder, out, *argv, base=JUDGE_ON):
     return pdf_ocr.parse_args([str(folder), "-o", str(out), *base, *argv])
 
 
-def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, base=ENGINE_ARGV):
+def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, base=JUDGE_ON):
     """A folder of blank PDFs, and the output root that a Run of them with `base` and `argv` left behind."""
     folder, out = tmp_path / "docs", tmp_path / "out"
     for name in names:
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
         blank_pdf(folder / name)
-    engine, client = engine_with(tmp_path / "engine")
-    if fail_pages:
-        client.fail_on = "Text Recognition:"
     args = options(folder, out, *argv, base=base)
+    engine, fakes = engine_for(args, tmp_path / "engine")
+    if fail_pages:
+        fakes.worker.fail_on = "Text Recognition:"
     for rel in pdf_ocr.find_pdfs(folder):
         errors = pdf_ocr.transcribe_document(engine, args, pdf_ocr.open_document(folder / rel, None),
                                              out / rel.parent / rel.stem)
@@ -35,7 +37,7 @@ def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, bas
     return folder, out
 
 
-def plan(folder, out, *argv, base=ENGINE_ARGV):
+def plan(folder, out, *argv, base=JUDGE_ON):
     return {d.relative.as_posix(): d for d in pdf_ocr.plan_run(folder, out, options(folder, out, *argv, base=base))}
 
 
@@ -52,6 +54,13 @@ def edit(path, change):
 def test_documents_whose_json_matches_the_pdf_and_the_options_are_done(tmp_path):
     folder, out = written(tmp_path)
     plan_ = plan(folder, out)
+    assert [(d.done, d.reason) for d in plan_.values()] == [(True, ""), (True, "")]
+
+
+@pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
+def test_documents_written_in_any_setup_are_done_for_a_run_with_the_same_options(tmp_path, setup):
+    folder, out = written(tmp_path, base=setup.options)
+    plan_ = plan(folder, out, base=setup.options)
     assert [(d.done, d.reason) for d in plan_.values()] == [(True, ""), (True, "")]
 
 
