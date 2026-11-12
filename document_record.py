@@ -1,9 +1,5 @@
-"""A Document's record: where its files go, the JSON that describes it, and whether a later Run finds it Already done.
-
-The writer of the JSON and the check that reads it back share one Fingerprint per Run (the `settings` section and the
-model names this Run writes), so they cannot disagree. Plain Python: nothing from paddle, the bridge or the Engine.
-The model names, the JSON `engine` section and the Engine's part of `postprocessing` come in as plain data.
-"""
+"""A Document's record: where its files go, the JSON that describes it, and whether a later Run finds it Already
+done."""
 from __future__ import annotations
 
 import hashlib
@@ -14,9 +10,9 @@ from typing import Callable, Mapping
 
 from block_reader import MAX_READINGS, SCHEDULE, ReadStep
 
-IMGS = "imgs"  # a Document's figures, charts and seals
-CSV = "csv"    # a Document's tables, one CSV each
-MODEL_KEYS = ("layout_model", "reader", "judge")  # the model names in the JSON `engine` section
+IMGS = "imgs"
+CSV = "csv"
+ENGINE_MODEL_KEYS = ("layout_model", "reader", "judge")
 
 
 def markdown_path(pdf: Path, folder: Path) -> Path:
@@ -28,7 +24,6 @@ def json_path(pdf: Path, folder: Path) -> Path:
 
 
 def sha256(pdf: Path) -> str:
-    """The PDF's sha256: the JSON records it, the check compares it, and it seeds the sampling of the Re-read Rounds."""
     with open(pdf, "rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
@@ -36,7 +31,7 @@ def sha256(pdf: Path) -> str:
 @dataclass(frozen=True)
 class Fingerprint:
     """What a Run writes into every Document's JSON and compares an earlier JSON with: the `settings` section and the
-    Engine's model names (`MODEL_KEYS`)."""
+    Engine's model names (`ENGINE_MODEL_KEYS`)."""
     settings: dict
     models: dict
 
@@ -58,14 +53,14 @@ def fingerprint(options, models: Mapping[str, str], supports: Callable[[ReadStep
         "seal_recognition": options.seals,
         "ocr_for_image_blocks": options.ocr_images,
         "merge_layout_blocks": not options.no_merge_blocks,
-        "reread_short_blocks": not options.judge and not options.no_recover,  # the ink-based one: never with the Judge
+        "reread_short_blocks": not options.judge and not options.no_recover,
         "markdown_merge_tables": not options.no_merge_tables,
         "markdown_ignore_labels": list(options.md_ignore_labels),
         "script": options.script,
         "page_markers": not options.no_page_markers,
         "csv_export": not options.no_csv,
     }
-    return Fingerprint(settings, {k: models[k] for k in MODEL_KEYS if k in models})
+    return Fingerprint(settings, {k: models[k] for k in ENGINE_MODEL_KEYS if k in models})
 
 
 @dataclass(frozen=True)
@@ -107,7 +102,7 @@ def write(pdf: Path, folder: Path, fingerprint: Fingerprint, engine: Mapping, ta
             "pages_processed": transcription.pages_processed,
             "pages_failed": transcription.pages_failed,
         },
-        "engine": {k: v for k, v in engine.items() if k not in MODEL_KEYS or k in models} | models,
+        "engine": {k: v for k, v in engine.items() if k not in ENGINE_MODEL_KEYS or k in models} | models,
         "settings": fingerprint.settings,
         "postprocessing": {
             "tables_with_line_breaks_fixed": transcription.tables_with_line_breaks_fixed,
@@ -131,10 +126,10 @@ def why_not_done(pdf: Path, folder: Path, fingerprint: Fingerprint) -> str | Non
     """None when the JSON an earlier Run left in `folder` for `pdf` reads cleanly and shows it is Already done: the PDF
     is the same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, the script repair
     was not skipped (`postprocessing.script_repair.skipped`), and the `settings` and the Engine's model names
-    (`MODEL_KEYS`) are the Fingerprint's. Otherwise the reason it has to be processed. A JSON that is missing, cut off
-    or lacks a field is never an error. Library versions and the device are not compared, and a failed cross-page
-    restructuring (`postprocessing.restructuring_failed`) is not read: the Document stays done, and --force redoes
-    it."""
+    (`ENGINE_MODEL_KEYS`) are the Fingerprint's. Otherwise the reason it has to be processed. A JSON that is missing,
+    cut off or lacks a field is never an error. Library versions and the device are not compared, and a failed
+    cross-page restructuring (`postprocessing.restructuring_failed`) is not read: the Document stays done, and --force
+    redoes it."""
     try:
         existing = json.loads(json_path(pdf, folder).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -163,7 +158,7 @@ def why_not_done(pdf: Path, folder: Path, fingerprint: Fingerprint) -> str | Non
     if written != settings:
         keys = sorted(k for k in written.keys() | settings.keys() if written.get(k) != settings.get(k))
         return f"settings differ: {', '.join(keys)}"
-    if differing := [k for k in MODEL_KEYS if engine.get(k) != fingerprint.models.get(k)]:
+    if differing := [k for k in ENGINE_MODEL_KEYS if engine.get(k) != fingerprint.models.get(k)]:
         return f"models differ: {', '.join(differing)}"
     try:
         if sha256(pdf) != source["sha256"]:

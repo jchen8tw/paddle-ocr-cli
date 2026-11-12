@@ -1,9 +1,3 @@
-"""Planning a folder Run, the Already-done half: `plan_run` asks the Document record about every Document, under the
-one Fingerprint of the Run. Pure file-system work, no model, no GPU.
-
-The JSONs under test are written with the record's own writer, so no Engine is involved. tests/test_document_record.py
-has every case of the check itself.
-"""
 from pathlib import Path
 
 import pytest
@@ -11,7 +5,7 @@ import pytest
 import document_record as record
 import pdf_ocr
 
-ENGINE = {"paddleocr": "3.7.0", "paddlex": "3.7.2", "device": "cpu"}  # the writer adds the Run's model names
+ENGINE = {"paddleocr": "3.7.0", "paddlex": "3.7.2", "device": "cpu"}
 
 
 def options(folder, out, *argv):
@@ -19,7 +13,6 @@ def options(folder, out, *argv):
 
 
 def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv):
-    """A folder of PDFs, and the output root where a Run with `argv` wrote a complete JSON for each of them."""
     folder, out = tmp_path / "docs", tmp_path / "out"
     for name in names:
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +66,7 @@ def test_a_planned_document_still_names_its_path_and_output_folder(tmp_path):
 
 def test_collisions_are_found_among_the_documents_that_are_done_too(tmp_path):
     folder, out = written(tmp_path, ("a.pdf",))
-    (folder / "a.PDF").write_bytes(b"%PDF-1.7 A")  # the same output folder as a.pdf, which is done
+    (folder / "a.PDF").write_bytes(b"%PDF-1.7 A")
     with pytest.raises(pdf_ocr.PlanError) as e:
         plan(folder, out)
     assert "a.pdf" in str(e.value) and "a.PDF" in str(e.value)

@@ -1,8 +1,3 @@
-"""The Document record: the JSON a Run writes for a Document, and whether a later Run finds that Document Already done.
-
-Each test writes a JSON with the module's own writer into a temporary folder, damages it if it needs to, and asks the
-module. No Engine, no model, no paddle.
-"""
 import argparse
 import hashlib
 import json
@@ -51,7 +46,6 @@ def transcription(pdf, pages=1, **results):
 
 
 def written(tmp_path, name="a", run=None, engine=ENGINE, tally=record.EngineTally(), **results):
-    """A PDF, and the folder where a Run with the Fingerprint `run` wrote its JSON."""
     pdf, folder = tmp_path / "docs" / f"{name}.pdf", tmp_path / "out" / name
     pdf.parent.mkdir(parents=True, exist_ok=True)
     pdf.write_bytes(f"%PDF-1.7 {name}".encode())
@@ -69,8 +63,6 @@ def edit(folder, change, name="a"):
     change(doc)
     (folder / f"{name}.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-
-# --- the JSON -------------------------------------------------------------------------------------------------------
 
 def test_the_json_is_named_after_the_pdf_and_its_sections_come_in_this_order(tmp_path):
     pdf, folder = written(tmp_path)
@@ -114,8 +106,6 @@ def test_the_settings_say_which_rounds_the_reader_can_do_and_only_with_the_judge
         (1, "greedy", True), (2, "greedy", True), (3, "temperature", False), (4, "temperature", False)]
     assert "reread_schedule" not in fingerprint(MODELS_WITHOUT_JUDGE, **WITHOUT_JUDGE).settings
 
-
-# --- Already done -----------------------------------------------------------------------------------------------------
 
 READERS_AND_JUDGES = [
     dict(models={**MODELS_WITHOUT_JUDGE, "reader": "PaddleOCR-VL-1.6"}, supports=greedy_rounds_only, reader="paddle",

@@ -320,7 +320,6 @@ def engine_models(args) -> dict:
 
 
 def run_fingerprint(args) -> document_record.Fingerprint:
-    """The settings and the model names a Run with these options writes into each Document's JSON."""
     return document_record.fingerprint(args, engine_models(args), reader_bridge.reader_supports(args.reader))
 
 
