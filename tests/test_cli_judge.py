@@ -256,40 +256,6 @@ def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
     assert "reread_schedule" not in fingerprint().settings
 
 
-# --- a run that ran out of GPU memory says what to do ---------------------------------------------------
-
-OOM_PAGE = {3: "RuntimeError: CUDA out of memory. Tried to allocate"}
-
-
-@pytest.mark.parametrize("argv, ways_out", [
-    ((), ["close other GPU programs", "--reader minicpm"]),
-    (("--reader", "minicpm"), ["close other GPU programs", "smallest"]),
-    (("--reader", "minicpm", "--judge"), ["close other GPU programs", "without --judge"]),
-    (("--judge",), ["close other GPU programs", "without --judge", "--reader minicpm --judge", "tightest"]),
-])
-def test_the_memory_hint_names_the_ways_out_of_the_configuration_that_ran(argv, ways_out):
-    hint = pdf_ocr.memory_hint(spec(*argv), OOM_PAGE, {})
-    assert hint.startswith("hint: the GPU ran out of memory")
-    assert all(w in hint for w in ways_out)
-
-
-def test_a_verdict_detail_about_memory_gives_the_hint_too():
-    oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", flagged=True)
-    assert "GPU" in pdf_ocr.memory_hint(spec("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
-
-
-def test_a_re_read_that_ran_out_of_memory_also_gives_the_hint():
-    oom = outcome(judged=True, verdict="scored", score=0.5, flagged=True, readings=[], stop_reason="reader_error",
-                  stop_detail="round 3: worker error: OutOfMemoryError: CUDA out of memory")
-    assert "GPU" in pdf_ocr.memory_hint(spec("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
-
-
-def test_other_failures_give_no_memory_hint():
-    other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", flagged=True)
-    assert pdf_ocr.memory_hint(spec("--judge"), {1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
-    assert pdf_ocr.memory_hint(spec(), {}, {}) is None
-
-
 def hook_unsupported_messages():
     import reader_bridge
 
@@ -322,7 +288,7 @@ def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monke
     with pytest.raises(SystemExit) as no_uv:
         pdf_ocr.start_worker(spec("--reader", "minicpm"), tmp_path)
     messages = [pdf_ocr.worker_env_problem(), str(no_uv.value.code), *hook_unsupported_messages(),
-                *(pdf_ocr.memory_hint(spec(*a), OOM_PAGE, {}) for a in
+                *(spec(*a).memory_advice for a in
                   ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]
     for msg in messages:
         assert "--no-judge" not in msg and "--reader paddle" not in msg, msg
