@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageDraw
 
 import pdf_ocr
 from reader_bridge import BlockQuery, MiniCPMBridge, PaddleBridge
@@ -270,6 +269,8 @@ def blank_pdf(path, pages=1, height=300):
 def inked_pdf(path):
     """A one-page PDF, 200 x 300 points, with a line of ink in INK_BOX (at 216 dpi: 240 x 24 pixels of black, about ten
     glyph widths) and nothing else."""
+    from PIL import Image, ImageDraw  # a transitive dependency (paddleocr): only the tests that need ink import it
+
     image = Image.new("RGB", (200, 300), "white")
     ImageDraw.Draw(image).rectangle([20, 30, 99, 37], fill="black")
     image.save(path, "PDF", resolution=72.0)
