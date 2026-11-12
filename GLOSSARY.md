@@ -73,6 +73,6 @@ names as this Run would write. A folder Run skips it unless `--force`.
 _Avoid_: finished, cached, up to date
 
 **Engine**:
-The full set of models and library versions used in one Run (Layout model, Reader, Judge), not any
-single model.
+The models one Run loads once and reads every page with (the Layout model, the Reader, and the Judge when it is
+on), with their library versions; not any single model.
 _Avoid_: backend, pipeline
