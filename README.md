@@ -1,7 +1,7 @@
 # pdf_ocr: PDF to Markdown, JSON and CSV with MiniCPM-OCR or PaddleOCR-VL, with a Score for every Block
 
-`pdf_ocr.py` converts a PDF into Markdown, a detailed JSON file and one CSV per table. It uses only
-the local models in `models/`:
+`pdf_ocr.py` converts a PDF, or every PDF in a folder, into Markdown, a detailed JSON file and one CSV per
+table. It uses only the local models in `models/`:
 
 | Model | Role |
 |---|---|
@@ -82,10 +82,11 @@ reason) and the run ends with a line saying so and suggesting `--no-judge` or `-
 ```bash
 uv run pdf_ocr.py input.pdf                         # -> output/<stem>/
 uv run pdf_ocr.py input.pdf -o out --pages 1-3,7,10-
+uv run pdf_ocr.py scans/                            # every PDF under scans/ -> output/scans/
 uv run pdf_ocr.py --help
 ```
 
-The output goes to `output/<pdf stem>/` unless you pass `-o`:
+The output of a PDF goes to `output/<pdf stem>/` unless you pass `-o`:
 
 ```
 <stem>.md      Markdown: headings, paragraphs, HTML tables, LaTeX formulas, <!-- page N --> markers
@@ -97,13 +98,114 @@ csv/           one CSV per valid table: pNNN_tableKK.csv (only if there are any)
 If any page fails, the run still finishes. The failure is recorded in the JSON (`source.pages_failed`)
 and in the Markdown, and the exit code is 1.
 
+### A folder of PDFs
+
+Pass a folder instead of a PDF and one run transcribes every PDF under it. Each PDF is a Document. The models
+load once, then the Documents go through one at a time.
+
+```bash
+uv run pdf_ocr.py scans/            # -> output/scans/
+uv run pdf_ocr.py scans/ -o results # -> results/
+uv run pdf_ocr.py .                 # the current directory; the default output/<its name>/ may lie inside it
+```
+
+Finding the Documents:
+- The whole tree is searched. A file is a Document when its name ends in `.pdf`, in any case (`.PDF`, `.Pdf`).
+  The contents are not checked.
+- A file or folder whose name starts with `.` is skipped, at any depth: `.git`, `.Trash`, and the `._report.pdf`
+  files macOS leaves on other disks.
+- A symlink to a PDF counts as that PDF. A symlinked folder is not entered, so a link loop or a link out of the
+  tree can neither make the run endless nor pull in other PDFs.
+- The same PDF at two paths is two Documents.
+- The Documents go in sorted order of their path relative to the folder, folder by folder (`a/z.pdf`, then
+  `a-b.pdf`, then `a.pdf`), so two runs of one folder behave alike.
+
+The output root is `-o`, or `output/<name of the folder>/` (`.` gives the name of the current directory). A
+Document at `<sub>/<name>.pdf` writes to `<root>/<sub>/<name>/`, with the files of a single PDF inside:
+
+```
+output/scans/
+├── invoice/                  scans/invoice.pdf
+│   ├── invoice.md
+│   ├── invoice.json
+│   └── csv/
+└── 2024/q1/report/           scans/2024/q1/report.pdf
+    ├── report.md
+    ├── report.json
+    ├── imgs/
+    └── csv/
+```
+
+A Document's `.md`, `.json` and CSVs are the same as a run on that PDF alone gives, down to the byte, except
+`elapsed_seconds`: it counts the Document's own time, without the model load that the Documents share.
+`source.file` is the bare file name, as for a single PDF. `--pages` cannot be used with a folder, since the
+Documents differ in length.
+
+Before any model loads, and with nothing written, the run stops with an error when:
+- the folder holds no Documents;
+- two Documents would write to one output folder (`a.pdf` and `a.PDF` side by side);
+- a Document's output folder would lie inside another's `imgs/` or `csv/` (`a.pdf` and `a/csv/b.pdf`).
+
+The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, worker
+environment, the Judge's renderer) come next and also stop the run before the first Document.
+
+A PDF that cannot be opened, or has no pages, is reported, counted as failed and gets no JSON, and the run goes
+on. A Document whose pages fail is written as for a single PDF. The exit code is 1 if any Document or any page
+failed, and 0 otherwise (a skipped Document is never a failure). On stderr, a folder run prints how many Documents it
+found and how many of them are already done (see "Running a folder again"), a note for each of those, `model load: Ns`
+once, a header `[i/n] <relative path> (<pages> pages)` before each processed Document's page lines and its `wrote ...`
+line, and at the end the count and one line for each failure. `i` is the Document's place among all the Documents
+found and `n` their number, whether or not the others are skipped. The notes of the skipped Documents come together
+right after the `found` line, before anything is loaded, so the headers that follow skip those numbers:
+
+```
+found 4 Documents in scans (2 already done)
+[1/4] 2023/old.pdf skipped: already done
+[4/4] invoice.pdf skipped: already done
+...
+model load: 31.2s
+[2/4] 2024/q1/report.pdf (12 pages)
+...
+[3/4] broken.pdf FAILED: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
+4 Documents: 1 written, 2 skipped, 1 failed
+  broken.pdf: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
+```
+
+A Document with failed pages is counted as written, and the lines after the count name its failed pages
+(`2024/q1/report.pdf: pages 3, 7 failed (recorded in its JSON)`).
+
+#### Running a folder again
+
+A run on a folder skips the Documents that are already done. An interrupted run therefore picks up where it
+stopped, and after you add PDFs to the folder only the new ones are processed. A Document is done when its
+`<name>.json` in the output folder reads cleanly and all of these hold:
+- `source.sha256` is the PDF's sha256: the PDF has not changed.
+- `source.pages_failed` is empty: a Document with failed pages is tried again.
+- `settings` equals the `settings` this run would write. Any option that shapes the output (`--reader`, `--dpi`,
+  `--judge-threshold`, `--no-judge`, `--script`, `--no-page-markers`, `--no-csv`, ...) therefore makes every
+  Document count as not done; options that do not (`-v`, `--device`, `--models-dir`) change nothing.
+- The Engine's models are the same: `engine.layout_model`, `engine.reader` and, with the Judge, `engine.judge`.
+
+Library versions and the device are not compared, so a `uv sync` or another GPU redoes nothing. A JSON that is
+missing, cut off by a kill, not JSON, or missing one of the fields above makes the Document not done. A PDF that
+could not be opened has no JSON, so the next run tries it again. A skipped Document is not touched.
+
+The check reads the JSONs and hashes the PDFs, and nothing else. When every Document is done, the run prints the
+summary and exits 0 without the setup checks and without loading a model, in seconds. The collisions of output
+folders are still checked among all the Documents, the skipped ones included.
+
+`--force` redoes every Document of the folder. Use it after a change the check cannot see, such as different
+weights placed under the same model folder names. A single PDF is always transcribed and overwrites its output, and
+`--force` with one is a usage error.
+
 ### Options
 
 | Option | Default | What it does |
 |---|---|---|
-| `-o, --output-dir` | `output/<stem>` | where to write the results |
+| `-o, --output-dir` | `output/<stem>` | where to write the results. For a folder it is the output root: `output/<folder name>` by default, with one subfolder per Document (see "A folder of PDFs") |
 | `--models-dir` | `./models` | folder containing `PP-DocLayoutV3/` and the Reader's folder (`MiniCPM-OCR-1.0/`, or `PaddleOCR-VL-1.6/` with `--reader paddle`) |
-| `--pages` | all | 1-based page selection, e.g. `1-3,7,10-` |
+| `--pages` | all | 1-based page selection, e.g. `1-3,7,10-`. Not with a folder |
+| `--force` | | with a folder: transcribe every Document again, also the ones already done (see "Running a folder again"). Not with a single PDF |
 | `--device` | `gpu:0` if available | Paddle device, e.g. `cpu` |
 | `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added, except that lone LaTeX symbols are written as their character (see "The MiniCPM-OCR-1.0 Reader") and, in a Traditional document, `≥`/`≤` as `≧`/`≦`; the JSON only gains a `reader` field in `engine` and `settings` |
 | `--dpi` | 216 | page render resolution (144, the official SDK's value, was slightly worse and not faster with MiniCPM; see "Tuning notes") |
@@ -133,8 +235,11 @@ The JSON has these top-level keys:
   and the device. Whenever the worker runs (MiniCPM, or the Judge) it also has the `torch`, `transformers`,
   `playwright` and `pillow` versions.
 - `settings`: every option that affects the output, including `reader`, `judge` and `judge_threshold` (null
-  with `--no-judge`). With the Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can
-  do each one: `supported`) and `max_readings_per_block`.
+  with `--no-judge`), `script` (`"auto"` or `"off"`, from `--script`) and `page_markers` (`false` with
+  `--no-page-markers`). `postprocessing.script_repair` still records what the repair actually did. With the
+  Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can do each one: `supported`)
+  and `max_readings_per_block`. A folder run compares `settings` and the model names of `engine` with its own to
+  decide whether a Document is already done (see "Running a folder again").
 - `postprocessing`: what the clean-up steps changed (whenever the worker runs, also `repetition_cuts`; with the
   Judge, a `judge` summary: `blocks_judged`, `blocks_reread`, `blocks_below_threshold` (still below the threshold
   after re-reading), `reread_stop_reasons` (a count per `stop_reason`), `readings_beyond_the_first` (every extra
@@ -146,7 +251,8 @@ The JSON has these top-level keys:
   `blocks_changed` counts the blocks the repair changed, whether for a Simplified character or only for a `≥`/`≤`
   glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`.
 - `csv_tables`: which tables were exported and which were skipped.
-- `elapsed_seconds`.
+- `elapsed_seconds`: for a single PDF, counted from the start of the model load. In a folder run, the Document's
+  own time, without the shared model load.
 - `pages`.
 
 Each page lists its `blocks`, each with these fields:
@@ -755,7 +861,11 @@ unsupported rounds, seeds), the re-read rounds through the bridges (`tests/test_
 repair, the Judge's verdicts with a fake renderer and model, the renderer's setup checks and fontconfig, the
 bridges, the JSON fields, the prompt and token limit of each block label, the
 clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
-a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, and the `--reader` options.
+a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, the `--reader` options, and folder runs: which
+Documents a folder holds and where each one writes (`tests/test_folder_plan.py`), which of them are already done
+(`tests/test_folder_done.py`), the `settings` and the Engine's model names known from the options alone
+(`tests/test_options_only.py`), what is refused before any model loads, and the loop over the Documents with a fake
+Engine, skipping, an output root inside the folder and a worker crash included (`tests/test_cli_folder.py`).
 
 The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer; except the reference-example
 test), the models, the worker environment (the Judge runs in it for either Reader) and the Judge's setup:
@@ -765,6 +875,13 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   names the hook uses.
 - `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
   is recorded as failed, and the next page gets a new worker.
+- `tests/test_folder_run.py` runs the CLI on a folder with the default Reader and the Judge at
+  `--judge-threshold 0.98`: two 2-page PDFs cut from the sample (one in a subfolder) and a corrupt PDF. Each good
+  Document's Markdown, JSON (apart from `elapsed_seconds`) and CSVs must equal a run on that PDF alone, the corrupt
+  file must be reported, the models load once and the exit code is 1. Then it deletes the corrupt PDF, which is
+  never done, and runs the folder again into the same output: both Documents are skipped, no model loads and the
+  exit code is 0; and once more with `--force`, which redoes both with the output they had. It runs one CLI process
+  after another, so it takes the time of five runs.
 - `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge` and once with
   `--judge-threshold 0` (Judge on, nothing re-read, whose Markdown must equal the `--no-judge` one), for each
   Reader, on a few pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a

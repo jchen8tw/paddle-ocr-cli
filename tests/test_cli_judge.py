@@ -71,6 +71,18 @@ def test_the_settings_record_whether_the_judge_was_on_and_its_threshold():
     assert s["reread_short_blocks"] is True  # the ink-based re-read is what runs without the Judge
 
 
+@pytest.mark.parametrize("argv, expected", [([], "auto"), (["--script", "auto"], "auto"), (["--script", "off"], "off")])
+@pytest.mark.parametrize("judge", [[], ["--no-judge"]])
+def test_the_settings_record_the_script_option_asked_for(argv, expected, judge):
+    assert pdf_ocr.settings_info(args(*argv, *judge))["script"] == expected
+
+
+@pytest.mark.parametrize("argv, expected", [([], True), (["--no-page-markers"], False)])
+@pytest.mark.parametrize("judge", [[], ["--no-judge"]])
+def test_the_settings_record_whether_page_markers_were_asked_for(argv, expected, judge):
+    assert pdf_ocr.settings_info(args(*argv, *judge))["page_markers"] is expected
+
+
 def test_with_the_judge_on_the_ink_based_reread_is_not_run_and_the_settings_say_so():
     assert pdf_ocr.settings_info(args())["reread_short_blocks"] is False
     assert pdf_ocr.settings_info(args("--no-recover", "--no-judge"))["reread_short_blocks"] is False
@@ -236,10 +248,11 @@ def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
     s = pdf_ocr.settings_info(args())
     assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
         (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
-    assert "supported" not in s["reread_schedule"][0] and s["max_readings_per_block"] == 10
-    bridge = types.SimpleNamespace(supports=lambda step: step.decode == "greedy")
-    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"), bridge)["reread_schedule"]] == [
+    assert [r["supported"] for r in s["reread_schedule"]] == [True] * 4 and s["max_readings_per_block"] == 10
+    assert [r["supported"] for r in pdf_ocr.settings_info(args("--reader", "paddle"))["reread_schedule"]] == [
         True, True, False, False]
+    bridge = types.SimpleNamespace(supports=lambda step: step.round == 1)  # a live bridge answers for its Reader
+    assert [r["supported"] for r in pdf_ocr.settings_info(args(), bridge)["reread_schedule"]] == [True, False, False, False]
     assert "reread_schedule" not in pdf_ocr.settings_info(args("--no-judge"))
 
 
