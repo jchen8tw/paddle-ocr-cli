@@ -17,7 +17,8 @@ def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv):
     for name in names:
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
         (folder / name).write_bytes(f"%PDF-1.7 {name}".encode())
-    run = pdf_ocr.run_fingerprint(options(folder, out, *argv))
+    run_options = options(folder, out, *argv)
+    run = pdf_ocr.run_fingerprint(pdf_ocr.EngineSpec.from_options(run_options), run_options)
     for name in names:
         pdf, rel = folder / name, Path(name)
         (out / rel.parent / rel.stem).mkdir(parents=True)
@@ -29,7 +30,9 @@ def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv):
 
 
 def plan(folder, out, *argv):
-    return {d.relative.as_posix(): d for d in pdf_ocr.plan_run(folder, out, options(folder, out, *argv))}
+    run_options = options(folder, out, *argv)
+    planned = pdf_ocr.plan_run(folder, out, pdf_ocr.EngineSpec.from_options(run_options), run_options)
+    return {d.relative.as_posix(): d for d in planned}
 
 
 def test_documents_whose_json_matches_the_pdf_and_the_options_are_done(tmp_path):

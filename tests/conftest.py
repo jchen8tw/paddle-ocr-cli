@@ -48,13 +48,13 @@ class Config:
     record: dict
 
     @property
-    def options(self):
-        return pdf_ocr.parse_args(["x.pdf", *self.argv])
+    def spec(self) -> pdf_ocr.EngineSpec:
+        return pdf_ocr.EngineSpec.from_options(pdf_ocr.parse_args(["x.pdf", *self.argv]))
 
 
 CONFIGS = [c for name, rec in BASELINE["configurations"].items()
-           if (c := Config(name, tuple(rec["argv"]), rec)).options.reader in READERS]
-JUDGED = [c for c in CONFIGS if c.options.judge]
+           if (c := Config(name, tuple(rec["argv"]), rec)).spec.reader in READERS]
+JUDGED = [c for c in CONFIGS if c.spec.judge]
 
 
 def models_root() -> Path:
@@ -101,8 +101,8 @@ def reread_pages() -> str:
 class Cli:
     """Runs pdf_ocr.py on the sample in a subprocess, once per distinct meaning: a run is identified by its parsed
     options, so `--reader paddle` and no options are one run. Each run gets a models folder holding symlinks to
-    exactly required_model_dirs(options), and, unless needs_worker(options), a PDF_OCR_WORKER_ENV that does not
-    exist, so every run also proves that the CLI asks only for what its options use."""
+    exactly the model folders of its Engine spec, and, unless the spec needs the worker, a PDF_OCR_WORKER_ENV that
+    does not exist, so every run also proves that the CLI asks only for what its options use."""
 
     def __init__(self, pdf: Path, pages: str, tmp: pytest.TempPathFactory):
         self.pdf, self.pages, self.tmp = pdf, pages, tmp
@@ -111,31 +111,32 @@ class Cli:
     def runs(self, *argv: str, n: int = 1, pages: str | None = None) -> list[Path]:
         pages = pages or self.pages
         options = pdf_ocr.parse_args([str(self.pdf), "--models-dir", str(models_root()), "--pages", pages, *argv])
-        if msg := pdf_ocr.missing_models_message(options):
+        spec = pdf_ocr.EngineSpec.from_options(options)
+        if msg := pdf_ocr.missing_models_message(spec, options.models_dir):
             pytest.skip(msg)
         if importlib.util.find_spec("paddle") is None:
             pytest.skip("paddle is not installed in this environment (run pytest from the project venv)")
-        if pdf_ocr.needs_worker(options) and (problem := pdf_ocr.worker_env_problem()):
+        if spec.needs_worker and (problem := pdf_ocr.worker_env_problem()):
             pytest.skip(problem)
-        if options.judge and (problems := pdf_ocr.judge_setup_problems()):
+        if spec.judge and (problems := pdf_ocr.judge_setup_problems()):
             pytest.skip("; ".join(problems))
         key = repr(sorted(vars(options).items()))
         for i in range(n):
             if (key, i) not in self.done:
-                self.done[key, i] = self._run(options, argv, pages)
+                self.done[key, i] = self._run(spec, argv, pages)
         return [self.done[key, i] for i in range(n)]
 
     def run(self, *argv: str, pages: str | None = None) -> Path:
         return self.runs(*argv, pages=pages)[0]
 
-    def _run(self, options, argv: tuple[str, ...], pages: str) -> Path:
+    def _run(self, spec: pdf_ocr.EngineSpec, argv: tuple[str, ...], pages: str) -> Path:
         label = " ".join(argv) or "(no options)"
         out = self.tmp.mktemp("run")
         models = self.tmp.mktemp("models")
-        for name in pdf_ocr.required_model_dirs(options):
+        for name in spec.model_dirs:
             (models / name).symlink_to(models_root() / name, target_is_directory=True)
         env = dict(os.environ)
-        if not pdf_ocr.needs_worker(options):
+        if not spec.needs_worker:
             env["PDF_OCR_WORKER_ENV"] = str(self.tmp.mktemp("no_worker") / "missing")
         done = subprocess.run(
             [sys.executable, str(ROOT / "pdf_ocr.py"), str(self.pdf), "-o", str(out), "--models-dir", str(models),

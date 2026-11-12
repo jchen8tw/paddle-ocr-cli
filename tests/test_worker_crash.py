@@ -20,7 +20,7 @@ def run_with_fake_worker(monkeypatch, sample_pdf, layout_models_dir, out, extra_
     for k, v in extra_env:
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(pdf_ocr, "worker_env_problem", lambda: None)
-    monkeypatch.setattr(pdf_ocr, "worker_command", lambda args, uv: [sys.executable, FAKE])
+    monkeypatch.setattr(pdf_ocr, "worker_command", lambda spec, models_dir, uv: [sys.executable, FAKE])
     code = pdf_ocr.main([str(sample_pdf), "-o", str(out), "--models-dir", str(layout_models_dir),
                          "--pages", "1-2", "--no-csv", "--reader", "minicpm", "--judge"])
     doc = json.loads((out / f"{sample_pdf.stem}.json").read_text(encoding="utf-8"))

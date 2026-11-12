@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import enum
 import importlib.metadata
 import os
 import re
@@ -182,6 +183,90 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
     return sorted(out)
 
 
+# --------------------------------------------------------------------------- Engine spec
+
+class Adapter(enum.Enum):
+    """How the Engine reads a page: with PaddleOCR-VL alone, or with the worker, which holds MiniCPM-OCR, the Judge,
+    or both."""
+    PADDLEOCR_VL_ALONE = "PaddleOCR-VL alone"
+    WORKER = "with the worker"
+
+
+# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
+MEMORY_WAYS_OUT = {
+    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
+                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
+                       "environment)",
+    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
+    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
+                       "--judge",
+    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
+                      "tightest combination; close other GPU programs, run without --judge, or use "
+                      "--reader minicpm --judge",
+}
+
+
+@dataclass(frozen=True)
+class EngineSpec:
+    """What the Engine loads and how it reads, settled once per Run from the options. Every rule that depends on the
+    Reader and the Judge is answered here."""
+    reader: str
+    judge: bool
+    judge_threshold: float | None
+    dpi: float
+    max_new_tokens: int
+    layout_threshold: float
+    charts: bool
+    seals: bool
+    ocr_images: bool
+    merge_blocks: bool
+    recover: bool
+    script: str
+
+    @classmethod
+    def from_options(cls, options) -> EngineSpec:
+        return cls(reader=options.reader, judge=options.judge, judge_threshold=options.judge_threshold,
+                   dpi=options.dpi, max_new_tokens=options.max_new_tokens, layout_threshold=options.layout_threshold,
+                   charts=options.charts, seals=options.seals, ocr_images=options.ocr_images,
+                   merge_blocks=not options.no_merge_blocks, recover=not options.no_recover, script=options.script)
+
+    @property
+    def adapter(self) -> Adapter:
+        return Adapter.WORKER if self.reader == "minicpm" or self.judge else Adapter.PADDLEOCR_VL_ALONE
+
+    @property
+    def needs_worker(self) -> bool:
+        return self.adapter is Adapter.WORKER
+
+    @property
+    def models(self) -> dict[str, str]:
+        """The model names of the JSON `engine` section and of the Already-done check: the Layout model, the Reader,
+        and the Judge when it is on. Each is also the folder of --models-dir that holds it, and the name the worker
+        (worker/serve.py) gives it."""
+        return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[self.reader],
+                **({"judge": JUDGE_MODEL_DIR} if self.judge else {})}
+
+    @property
+    def model_dirs(self) -> list[str]:
+        return list(self.models.values())
+
+    @property
+    def worker_flags(self) -> list[str]:
+        return [*(["--no-reader"] if self.reader != "minicpm" else []), *([] if self.judge else ["--no-judge"])]
+
+    @property
+    def ink_reread(self) -> bool:
+        return self.recover and not self.judge
+
+    @property
+    def memory_advice(self) -> str:
+        return MEMORY_WAYS_OUT[self.reader, self.judge]
+
+    def supports(self, step) -> bool:
+        """Whether the Reader can do this re-read Round, known without a bridge."""
+        return reader_bridge.reader_supports(self.reader)(step)
+
+
 # --------------------------------------------------------------------------- script repair
 
 def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, dict]:
@@ -237,19 +322,14 @@ def pick_device(requested: str | None) -> str:
     return "cpu"
 
 
-def required_model_dirs(args) -> list[str]:
-    """The folders of --models-dir that the chosen options use (and nothing else)."""
-    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader], *([JUDGE_MODEL_DIR] if args.judge else [])]
-
-
-def missing_models_message(args) -> str | None:
-    missing = [d for d in required_model_dirs(args) if not (args.models_dir / d).is_dir()]
+def missing_models_message(spec: EngineSpec, models_dir: Path) -> str | None:
+    missing = [d for d in spec.model_dirs if not (models_dir / d).is_dir()]
     if not missing:
         return None
-    other = "paddle" if args.reader == "minicpm" else "minicpm"
-    return (f"model folder(s) not found under {args.models_dir}: {', '.join(missing)}. "
+    other = "paddle" if spec.reader == "minicpm" else "minicpm"
+    return (f"model folder(s) not found under {models_dir}: {', '.join(missing)}. "
             f"Put them there (nothing is downloaded at run time); --reader {other} needs "
-            f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
+            f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[spec.reader]}.")
 
 
 WORKER_FREE = "a run without --reader minicpm and --judge does not need it"
@@ -257,11 +337,6 @@ WORKER_FREE = "a run without --reader minicpm and --judge does not need it"
 
 def worker_env_path() -> Path:
     return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
-
-
-def needs_worker(args) -> bool:
-    """The torch worker holds MiniCPM (--reader minicpm) and Jev (--judge)."""
-    return args.reader == "minicpm" or args.judge
 
 
 def worker_env_problem() -> str | None:
@@ -285,15 +360,13 @@ def worker_environment() -> dict:
     return env
 
 
-def worker_command(args, uv: str) -> list[str]:
-    """Only what the options use is loaded: MiniCPM only with --reader minicpm, Jev only with --judge. The worker's
-    own --no-reader and --no-judge flags are its private protocol, not the CLI's."""
+def worker_command(spec: EngineSpec, models_dir: Path, uv: str) -> list[str]:
+    """The worker's flags (EngineSpec.worker_flags) are its private protocol, not the CLI's."""
     return [uv, "run", "--project", str(WORKER_DIR), "--no-sync",
-            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve()),
-            *(["--no-reader"] if args.reader != "minicpm" else []), *([] if args.judge else ["--no-judge"])]
+            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(models_dir.resolve()), *spec.worker_flags]
 
 
-def start_worker(args):
+def start_worker(spec: EngineSpec, models_dir: Path):
     """Start the torch worker and wait until its models are loaded. Returns (client, ready event)."""
     from worker_client import WorkerClient, WorkerError
 
@@ -303,7 +376,7 @@ def start_worker(args):
                  f"(install uv; {WORKER_FREE})")
     if problem := worker_env_problem():
         sys.exit(f"error: {problem}")
-    client = WorkerClient(worker_command(args, uv), env=worker_environment())
+    client = WorkerClient(worker_command(spec, models_dir, uv), env=worker_environment())
     try:
         return client, client.start()
     except WorkerError as e:
@@ -311,23 +384,15 @@ def start_worker(args):
         sys.exit(f"error: {e}")
 
 
-def engine_models(args) -> dict:
-    """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
-    from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
-    (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
-    return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
-            **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
+def run_fingerprint(spec: EngineSpec, args) -> document_record.Fingerprint:
+    return document_record.fingerprint(args, spec.models, spec.supports)
 
 
-def run_fingerprint(args) -> document_record.Fingerprint:
-    return document_record.fingerprint(args, engine_models(args), reader_bridge.reader_supports(args.reader))
-
-
-def engine_info(args, device: str, ready: dict | None) -> dict:
+def engine_info(spec: EngineSpec, device: str, ready: dict | None) -> dict:
     """The JSON `engine` section: the Layout model, the Reader and the Judge, with the library versions."""
-    models = engine_models(args)
+    models = spec.models
     engine = {"layout_model": models["layout_model"], "reader": models["reader"]}
-    if args.reader == "paddle":
+    if spec.reader == "paddle":
         engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
     engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
     if "judge" in models:
@@ -338,7 +403,7 @@ def engine_info(args, device: str, ready: dict | None) -> dict:
     return engine
 
 
-def build_pipeline(args, device: str):
+def build_pipeline(spec: EngineSpec, args, device: str):
     from paddleocr import PaddleOCRVL
 
     if not args.verbose:  # must run after the import: PaddleX configures its logger on import
@@ -346,7 +411,7 @@ def build_pipeline(args, device: str):
 
         pdx_logging.setup_logging("WARNING")
 
-    if args.reader == "paddle":
+    if spec.reader == "paddle":
         reader_args = {"vl_rec_model_dir": str(args.models_dir / VL_MODEL_DIR)}
     else:
         # The Reader is replaced by the worker (reader_bridge). Naming a server backend with a URL that is
@@ -357,12 +422,12 @@ def build_pipeline(args, device: str):
         layout_detection_model_dir=str(args.models_dir / LAYOUT_MODEL_DIR),
         **reader_args,
         device=device,
-        layout_threshold=args.layout_threshold,
+        layout_threshold=spec.layout_threshold,
         use_layout_detection=True,
-        use_chart_recognition=args.charts,
-        use_seal_recognition=args.seals,
-        use_ocr_for_image_block=args.ocr_images,
-        merge_layout_blocks=not args.no_merge_blocks,
+        use_chart_recognition=spec.charts,
+        use_seal_recognition=spec.seals,
+        use_ocr_for_image_block=spec.ocr_images,
+        merge_layout_blocks=spec.merge_blocks,
         markdown_ignore_labels=list(args.md_ignore_labels),
         format_block_content=False,  # keep the raw recognised text in the JSON
         # The orientation/unwarping models are not part of ./models, so they stay off.
@@ -382,7 +447,7 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(args, pipe, stack, ink):
+def attach_worker(spec: EngineSpec, models_dir: Path, pipe, stack, ink):
     """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
@@ -395,27 +460,27 @@ def attach_worker(args, pipe, stack, ink):
         sys.exit(f"error: {e} The hook is used by --reader minicpm and --judge; {WORKER_FREE}.")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
-    judge = args.judge
-    repair = StickyScriptRepair(ScriptRepair()) if judge and args.script == "auto" else None
-    paddle_model = reader_bridge.original_vl_model(pipe) if args.reader == "paddle" else None
+    judge = spec.judge
+    repair = StickyScriptRepair(ScriptRepair()) if judge and spec.script == "auto" else None
+    paddle_model = reader_bridge.original_vl_model(pipe) if spec.reader == "paddle" else None
     if paddle_model is not None:
         free_paddle_cache()  # the pipeline's construction left several GB cached; the Judge needs the room
     t0 = time.time()
     print("starting the torch worker ...", file=sys.stderr)
-    client, ready = start_worker(args)
+    client, ready = start_worker(spec, models_dir)
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
     common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair,
-                  **({"judge_threshold": args.judge_threshold} if judge else {}))
+                  **({"judge_threshold": spec.judge_threshold} if judge else {}))
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
             paddle_model, client, tmp_dir, before_read=client.park if judge else None,
             after_read=free_paddle_cache, **common)
     else:
         bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, **common)
-        if not judge and not args.no_recover:
-            bridge.ink_reread = ink.reread_with(bridge, args)
+        if spec.ink_reread:
+            bridge.ink_reread = ink.reread_with(bridge, spec)
     reader_bridge.install_reader_hook(pipe, bridge)
     return bridge, ready
 
@@ -498,14 +563,14 @@ def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
     return best_text if best_text is not None and best_n > 1.5 * n else None
 
 
-def recover_short_blocks(pipe, page, res, img, scale: float, args, page_no: int) -> list[dict]:
+def recover_short_blocks(pipe, page, res, img, scale: float, spec: EngineSpec, page_no: int) -> list[dict]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
     differently scaled renders and keep the result only if it is clearly longer and plausible. When the re-read of a
     Block fails (the GPU ran out of memory, say) the Block keeps its first Reading and the page goes on, as in the
     bridge (`page_no` is the page's number from 1, for the warning).
     (PaddleOCR-VL without --judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
-    renders = PageRenders(page, img, scale, args.dpi)
+    renders = PageRenders(page, img, scale, spec.dpi)
     for b in res["parsing_res_list"]:
         if b.label not in TEXT_LABELS:
             continue
@@ -517,7 +582,7 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args, page_no: int)
         def reread_at_scale(factor, bbox=bbox):
             r = renders.region(bbox, factor)
             out = pipe.predict(r, use_layout_detection=False, prompt_label="ocr",
-                               max_new_tokens=args.max_new_tokens, use_queues=False)[0]
+                               max_new_tokens=spec.max_new_tokens, use_queues=False)[0]
             return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
 
         try:
@@ -582,7 +647,7 @@ class InkReread:
     def reset(self) -> None:
         self.renders = None
 
-    def reread_with(self, bridge, args):
+    def reread_with(self, bridge, spec: EngineSpec):
         def ink_reread(request, text):
             if self.renders is None or request.label not in TEXT_LABELS or request.bbox is None:
                 return None
@@ -592,7 +657,7 @@ class InkReread:
                 return None
 
             def reread_at_scale(factor):
-                return bridge.read_crop(renders.region(bbox, factor), "text", args.max_new_tokens).strip()
+                return bridge.read_crop(renders.region(bbox, factor), "text", spec.max_new_tokens).strip()
 
             return ink_reread_block(crop, text, reread_at_scale)
 
@@ -758,26 +823,12 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
-# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
-MEMORY_WAYS_OUT = {
-    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
-                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
-                       "environment)",
-    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
-    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
-                       "--judge",
-    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
-                      "tightest combination; close other GPU programs, run without --judge, or use "
-                      "--reader minicpm --judge",
-}
-
-
-def memory_hint(args, errors: dict, outcomes: dict) -> str | None:
+def memory_hint(spec: EngineSpec, errors: dict, outcomes: dict) -> str | None:
     """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
     texts = [*errors.values(), *(f"{o.verdict_detail or ''} {o.stop_detail or ''}" for o in outcomes.values())]
     if not any("out of memory" in t.lower() for t in texts):
         return None
-    return f"hint: the GPU ran out of memory: {MEMORY_WAYS_OUT[args.reader, args.judge]}"
+    return f"hint: the GPU ran out of memory: {spec.memory_advice}"
 
 
 def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
@@ -1040,7 +1091,7 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                         + "\n  ".join(problems))
 
 
-def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
+def plan_run(folder: Path, output_root: Path | None, spec: EngineSpec, args) -> list[PlannedDocument]:
     """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
     with the folder it writes to and whether it is Already done (`document_record.why_not_done`, under one
     Fingerprint for the whole Run; never with --force). `output_root` is `-o`, or None for output/<name of the
@@ -1053,7 +1104,7 @@ def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocume
     refuse_collisions(documents)
     if args.force:
         return [replace(d, reason="--force") for d in documents]
-    fingerprint = run_fingerprint(args)
+    fingerprint = run_fingerprint(spec, args)
     reasons = [document_record.why_not_done(d.path, d.out_dir, fingerprint) for d in documents]
     return [replace(d, done=reason is None, reason=reason or "") for d, reason in zip(documents, reasons)]
 
@@ -1091,32 +1142,34 @@ def open_document(path: Path, pages: str | None) -> Document:
         raise DocumentError(str(e)) from None
 
 
-def check_setup(args) -> None:
-    """Exit with an error unless the models, opencc, the worker environment and the Judge's renderer that the options
-    need are in place. Done once per Run, before anything is loaded."""
-    if msg := missing_models_message(args):
+def check_setup(spec: EngineSpec, models_dir: Path) -> None:
+    """Exit with an error unless the models, opencc, the worker environment and the Judge's renderer that the Run
+    needs are in place. Done once per Run, before anything is loaded."""
+    if msg := missing_models_message(spec, models_dir):
         sys.exit(f"error: {msg}")
-    if args.script == "auto":
+    if spec.script == "auto":
         try:
             importlib.import_module("opencc")
         except ImportError:
             sys.exit("error: --script auto (the default) repairs Simplified drift with opencc, which cannot be "
                      "imported. Install it with:  uv sync   (or run with --script off, which keeps the raw model "
                      "output)")
-    if needs_worker(args) and (problem := worker_env_problem()):
+    if spec.needs_worker and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
-    if args.judge and (problems := judge_setup_problems()):
+    if spec.judge and (problems := judge_setup_problems()):
         sys.exit("error: --judge needs the Judge's renderer, which is not set up (or run without --judge):\n  - "
                  + "\n  - ".join(problems))
 
 
 class Engine:
-    """What a Run loads once and every Document of it shares: the Layout model and the Reader (`pipe`, with the
-    Reader hook installed), the `device`, and, when the options need the worker, its `ready` event and the `bridge`.
-    `load_started` is when the loading began. The worker is released when the Run's ExitStack closes."""
+    """What a Run loads once and every Document of it shares: the `spec` it was loaded from, the Layout model and the
+    Reader (`pipe`, with the Reader hook installed), the `device`, and, when the spec needs the worker, its `ready`
+    event and the `bridge`. `load_started` is when the loading began. The worker is released when the Run's ExitStack
+    closes."""
 
-    def __init__(self, pipe, device: str, bridge, ink: InkReread, ready: dict | None, load_started: float | None = None):
-        self.pipe, self.device, self.bridge, self.ink, self.ready = pipe, device, bridge, ink, ready
+    def __init__(self, spec: EngineSpec, pipe, device: str, bridge, ink: InkReread, ready: dict | None,
+                 load_started: float | None = None):
+        self.spec, self.pipe, self.device, self.bridge, self.ink, self.ready = spec, pipe, device, bridge, ink, ready
         self.load_started = load_started
 
     def begin_document(self, doc_hash: str) -> None:
@@ -1127,19 +1180,19 @@ class Engine:
         self.ink.reset()
 
 
-def load_engine(args, stack) -> Engine:
+def load_engine(spec: EngineSpec, args, stack) -> Engine:
     """Load the models once per Run (after check_setup): the Layout model, the worker, and the bridge with the
     Reader hook installed. The worker and the crop folder are released when `stack` closes."""
     device = pick_device(args.device)
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
-    pipe = build_pipeline(args, device)
+    pipe = build_pipeline(spec, args, device)
     bridge = ready = None
     ink = InkReread()
-    if needs_worker(args):
-        bridge, ready = attach_worker(args, pipe, stack, ink)
+    if spec.needs_worker:
+        bridge, ready = attach_worker(spec, args.models_dir, pipe, stack, ink)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
-    return Engine(pipe, device, bridge, ink, ready, t_start)
+    return Engine(spec, pipe, device, bridge, ink, ready, t_start)
 
 
 def transcribe_document(engine: Engine, args, document: Document, out_dir: Path, started: float | None = None) -> dict:
@@ -1151,7 +1204,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     doc_hash = document_record.sha256(document.path)
     engine.begin_document(doc_hash)
-    pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
+    spec, pipe, bridge, ink, device = engine.spec, engine.pipe, engine.bridge, engine.ink, engine.device
 
     ok: list[tuple[int, object]] = []
     meta: dict[int, dict] = {}
@@ -1160,25 +1213,25 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
         t0 = time.time()
         page = pdf[idx]
         try:
-            img, scale = render_page(page, args.dpi)
+            img, scale = render_page(page, spec.dpi)
             if bridge is not None:
                 bridge.current_page = idx
-                bridge.page_source = PageRenders(page, img, scale, args.dpi)
+                bridge.page_source = PageRenders(page, img, scale, spec.dpi)
                 ink.set_page(bridge.page_source)
-            res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
+            res = pipe.predict(img, max_new_tokens=spec.max_new_tokens, use_queues=False)[0]
             recovered = []
-            if not args.judge and not args.no_recover and args.reader == "paddle":
-                recovered = recover_short_blocks(pipe, page, res, img, scale, args, idx + 1)  # PaddleOCR-VL, as before
+            if spec.ink_reread and spec.adapter is Adapter.PADDLEOCR_VL_ALONE:
+                recovered = recover_short_blocks(pipe, page, res, img, scale, spec, idx + 1)
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
-            if bridge is not None and args.judge:
+            if bridge is not None and spec.judge:
                 for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
                     print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
                           "Reader hook, or its box changed after reading)", file=sys.stderr)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
             print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
-                            summary=bridge.page_summary(idx) if bridge and args.judge else None,
+                            summary=bridge.page_summary(idx) if bridge and spec.judge else None,
                             recovered=n_reread), file=sys.stderr)
         except Exception as e:  # keep going; the failure is recorded in the JSON and the exit code
             errors[idx] = f"{type(e).__name__}: {e}"
@@ -1222,42 +1275,42 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     tally = document_record.EngineTally()
     if bridge is not None:
         judge = ({**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}
-                 if args.judge else None)
+                 if spec.judge else None)
         tally = document_record.EngineTally(bridge.repetition_cuts, bridge.symbols_unwrapped, judge)
     transcription = document_record.Transcription(
         sha256=doc_hash, page_count=total, pages_processed=[i + 1 for i in indices],
         pages_failed=[i + 1 for i in sorted(errors)], tables_with_line_breaks_fixed=tables_fixed,
         latex_symbols_unwrapped=unwrapped, script_repair=script_info, restructuring_failed=restructuring_failed,
         csv_tables=csv_info, elapsed_seconds=time.time() - t_start, pages=[pages[i] for i in sorted(pages)])
-    json_path = document_record.write(document.path, out_dir, run_fingerprint(args),
-                                      engine_info(args, device, engine.ready), tally, transcription)
-    if hint := memory_hint(args, errors, outcomes):
+    json_path = document_record.write(document.path, out_dir, run_fingerprint(spec, args),
+                                      engine_info(spec, device, engine.ready), tally, transcription)
+    if hint := memory_hint(spec, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
     return errors
 
 
-def transcribe(args) -> int:
+def transcribe(spec: EngineSpec, args) -> int:
     """A Run on one PDF: load the Engine, then transcribe the Document."""
     import contextlib
 
     if not args.pdf.is_file():
         sys.exit(f"error: no such file: {args.pdf}")
-    check_setup(args)
+    check_setup(spec, args.models_dir)
     try:
         document = open_document(args.pdf, args.pages)
     except DocumentError as e:
         sys.exit(f"error: {e}")
     with contextlib.ExitStack() as stack:  # releases the worker and its crop folder when the Run ends, however it ends
         stack.callback(document.close)
-        engine = load_engine(args, stack)
+        engine = load_engine(spec, args, stack)
         errors = transcribe_document(engine, args, document, args.output_dir or Path("output") / args.pdf.stem,
                                      started=engine.load_started)
     return 1 if errors else 0
 
 
-def transcribe_folder(args) -> int:
+def transcribe_folder(spec: EngineSpec, args) -> int:
     """A Run on every Document under a folder: plan it, and if any Document is not already done, check the setup, load
     the Engine once and transcribe those Documents one at a time. A Document that fails is reported and the Run goes
     on. A Run with nothing left to do touches no model. Documents are numbered by their place in the whole Run."""
@@ -1265,7 +1318,7 @@ def transcribe_folder(args) -> int:
     import traceback
 
     try:
-        plan = plan_run(args.pdf, args.output_dir, args)
+        plan = plan_run(args.pdf, args.output_dir, spec, args)
     except PlanError as e:
         sys.exit(f"error: {e}")
     labels = [f"[{i}/{len(plan)}] {planned.relative_posix}" for i, planned in enumerate(plan, 1)]
@@ -1283,8 +1336,8 @@ def transcribe_folder(args) -> int:
 
     with contextlib.ExitStack() as stack:
         if todo:
-            check_setup(args)
-            engine = load_engine(args, stack)
+            check_setup(spec, args.models_dir)
+            engine = load_engine(spec, args, stack)
         for label, planned in todo:
             document = None
             try:
@@ -1313,12 +1366,13 @@ def transcribe_folder(args) -> int:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    spec = EngineSpec.from_options(args)
     # Skip model-hoster connectivity checks and quiet noisy third-party output before importing paddle.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     if not args.verbose:
         warnings.filterwarnings("ignore", message=".*ccache.*")
         warnings.filterwarnings("ignore", message=".*copy construct from a tensor.*")
-    return transcribe_folder(args) if args.pdf.is_dir() else transcribe(args)
+    return transcribe_folder(spec, args) if args.pdf.is_dir() else transcribe(spec, args)
 
 
 if __name__ == "__main__":

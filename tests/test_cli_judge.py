@@ -1,5 +1,6 @@
 """The Judge's command line, the JSON it adds and the stderr line (no GPU, no models)."""
 import types
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,15 @@ from block_reader import BlockResult, Reading
 
 def args(*argv):
     return pdf_ocr.parse_args(["in.pdf", *argv])
+
+
+def spec(*argv):
+    return pdf_ocr.EngineSpec.from_options(args(*argv))
+
+
+def fingerprint(*argv):
+    options = args(*argv)
+    return pdf_ocr.run_fingerprint(pdf_ocr.EngineSpec.from_options(options), options)
 
 
 def test_the_judge_is_off_by_default_and_judge_turns_it_on_with_the_official_threshold():
@@ -43,19 +53,12 @@ def test_the_ends_of_the_judge_threshold_range_are_accepted(ok):
 
 
 def test_the_judge_needs_its_model_folder_only_when_it_is_on(tmp_path):
-    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm", "--judge")) == [
-        "PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
-    assert pdf_ocr.required_model_dirs(args("--judge")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
-    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(args("--judge", "--models-dir", str(tmp_path)))
+    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(spec("--judge"), tmp_path)
+    assert "MiniCPM-OCR-Jev" not in pdf_ocr.missing_models_message(spec(), tmp_path)
 
 
-def test_the_worker_is_needed_for_minicpm_or_for_the_judge_and_loads_only_what_is_used():
-    assert not pdf_ocr.needs_worker(args()) and not pdf_ocr.needs_worker(args("--no-judge"))
-    assert pdf_ocr.needs_worker(args("--reader", "minicpm")) and pdf_ocr.needs_worker(args("--judge"))
-    assert pdf_ocr.needs_worker(args("--reader", "minicpm", "--judge"))
-    cmd = lambda *a: pdf_ocr.worker_command(args("--models-dir", "/m", *a), uv="/usr/bin/uv")
+def test_the_worker_loads_only_what_is_used():
+    cmd = lambda *a: pdf_ocr.worker_command(spec(*a), Path("/m"), uv="/usr/bin/uv")
     both = cmd("--reader", "minicpm", "--judge")
     assert "--no-reader" not in both and "--no-judge" not in both
     assert "--no-judge" in cmd("--reader", "minicpm") and "--no-reader" not in cmd("--reader", "minicpm")
@@ -67,26 +70,26 @@ READY = {"reader": "MiniCPM-OCR-1.0", "judge": "MiniCPM-OCR-Jev",
 
 
 def test_the_engine_names_the_judge_when_it_is_on():
-    e = pdf_ocr.engine_info(args("--reader", "minicpm", "--judge"), "gpu:0", READY)
+    e = pdf_ocr.engine_info(spec("--reader", "minicpm", "--judge"), "gpu:0", READY)
     assert e["judge"] == "MiniCPM-OCR-Jev" and e["playwright"] == "1.62.0"
-    assert "judge" not in pdf_ocr.engine_info(args("--reader", "minicpm"), "gpu:0", {**READY, "judge": None})
+    assert "judge" not in pdf_ocr.engine_info(spec("--reader", "minicpm"), "gpu:0", {**READY, "judge": None})
 
 
 def test_the_paddle_reader_with_the_judge_has_the_workers_versions_too():
-    e = pdf_ocr.engine_info(args("--judge"), "gpu:0", {**READY, "reader": None})
+    e = pdf_ocr.engine_info(spec("--judge"), "gpu:0", {**READY, "reader": None})
     assert e["reader"] == "PaddleOCR-VL-1.6" and e["judge"] == "MiniCPM-OCR-Jev" and e["torch"] == "2.15.0+cu132"
 
 
 def test_the_settings_record_whether_the_judge_was_on_and_its_threshold():
-    s = pdf_ocr.run_fingerprint(args("--reader", "minicpm", "--judge", "--judge-threshold", "0.9")).settings
+    s = fingerprint("--reader", "minicpm", "--judge", "--judge-threshold", "0.9").settings
     assert s["judge"] is True and s["judge_threshold"] == 0.9 and s["reader"] == "minicpm"
-    s = pdf_ocr.run_fingerprint(args("--no-judge")).settings
+    s = fingerprint("--no-judge").settings
     assert s["judge"] is False and s["judge_threshold"] is None
     assert s["reread_short_blocks"] is True  # the ink-based re-read is what runs without the Judge
 
 
 def test_a_run_with_no_options_records_paddle_without_the_judge_and_with_the_ink_based_reread():
-    s = pdf_ocr.run_fingerprint(args()).settings
+    s = fingerprint().settings
     assert (s["reader"], s["judge"], s["judge_threshold"], s["reread_short_blocks"]) == ("paddle", False, None, True)
     assert "reread_schedule" not in s
 
@@ -94,18 +97,18 @@ def test_a_run_with_no_options_records_paddle_without_the_judge_and_with_the_ink
 @pytest.mark.parametrize("argv, expected", [([], "auto"), (["--script", "auto"], "auto"), (["--script", "off"], "off")])
 @pytest.mark.parametrize("judge", [[], ["--judge"]])
 def test_the_settings_record_the_script_option_asked_for(argv, expected, judge):
-    assert pdf_ocr.run_fingerprint(args(*argv, *judge)).settings["script"] == expected
+    assert fingerprint(*argv, *judge).settings["script"] == expected
 
 
 @pytest.mark.parametrize("argv, expected", [([], True), (["--no-page-markers"], False)])
 @pytest.mark.parametrize("judge", [[], ["--judge"]])
 def test_the_settings_record_whether_page_markers_were_asked_for(argv, expected, judge):
-    assert pdf_ocr.run_fingerprint(args(*argv, *judge)).settings["page_markers"] is expected
+    assert fingerprint(*argv, *judge).settings["page_markers"] is expected
 
 
 def test_with_the_judge_on_the_ink_based_reread_is_not_run_and_the_settings_say_so():
-    assert pdf_ocr.run_fingerprint(args("--judge")).settings["reread_short_blocks"] is False
-    assert pdf_ocr.run_fingerprint(args("--no-recover")).settings["reread_short_blocks"] is False
+    assert fingerprint("--judge").settings["reread_short_blocks"] is False
+    assert fingerprint("--no-recover").settings["reread_short_blocks"] is False
 
 
 # --- the JSON of a judged Block -------------------------------------------------------------------------
@@ -265,14 +268,14 @@ def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rou
 
 
 def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
-    s = pdf_ocr.run_fingerprint(args("--judge")).settings
+    s = fingerprint("--judge").settings
     assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
         (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
     assert [r["supported"] for r in s["reread_schedule"]] == [True, True, False, False]
     assert s["max_readings_per_block"] == 10
-    minicpm = pdf_ocr.run_fingerprint(args("--reader", "minicpm", "--judge")).settings["reread_schedule"]
+    minicpm = fingerprint("--reader", "minicpm", "--judge").settings["reread_schedule"]
     assert [r["supported"] for r in minicpm] == [True] * 4
-    assert "reread_schedule" not in pdf_ocr.run_fingerprint(args()).settings
+    assert "reread_schedule" not in fingerprint().settings
 
 
 # --- a run that ran out of GPU memory says what to do ---------------------------------------------------
@@ -287,26 +290,26 @@ OOM_PAGE = {3: "RuntimeError: CUDA out of memory. Tried to allocate"}
     (("--judge",), ["close other GPU programs", "without --judge", "--reader minicpm --judge", "tightest"]),
 ])
 def test_the_memory_hint_names_the_ways_out_of_the_configuration_that_ran(argv, ways_out):
-    hint = pdf_ocr.memory_hint(args(*argv), OOM_PAGE, {})
+    hint = pdf_ocr.memory_hint(spec(*argv), OOM_PAGE, {})
     assert hint.startswith("hint: the GPU ran out of memory")
     assert all(w in hint for w in ways_out)
 
 
 def test_a_verdict_detail_about_memory_gives_the_hint_too():
     oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", flagged=True)
-    assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
+    assert "GPU" in pdf_ocr.memory_hint(spec("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_a_re_read_that_ran_out_of_memory_also_gives_the_hint():
     oom = outcome(judged=True, verdict="scored", score=0.5, flagged=True, readings=[], stop_reason="reader_error",
                   stop_detail="round 3: worker error: OutOfMemoryError: CUDA out of memory")
-    assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
+    assert "GPU" in pdf_ocr.memory_hint(spec("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_other_failures_give_no_memory_hint():
     other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", flagged=True)
-    assert pdf_ocr.memory_hint(args("--judge"), {1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
-    assert pdf_ocr.memory_hint(args(), {}, {}) is None
+    assert pdf_ocr.memory_hint(spec("--judge"), {1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
+    assert pdf_ocr.memory_hint(spec(), {}, {}) is None
 
 
 def hook_unsupported_messages():
@@ -339,9 +342,9 @@ def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monke
     monkeypatch.setenv("PDF_OCR_WORKER_ENV", str(tmp_path / "missing"))
     monkeypatch.setattr(pdf_ocr.shutil, "which", lambda name: None)
     with pytest.raises(SystemExit) as no_uv:
-        pdf_ocr.start_worker(args("--reader", "minicpm"))
+        pdf_ocr.start_worker(spec("--reader", "minicpm"), tmp_path)
     messages = [pdf_ocr.worker_env_problem(), str(no_uv.value.code), *hook_unsupported_messages(),
-                *(pdf_ocr.memory_hint(args(*a), OOM_PAGE, {}) for a in
+                *(pdf_ocr.memory_hint(spec(*a), OOM_PAGE, {}) for a in
                   ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]
     for msg in messages:
         assert "--no-judge" not in msg and "--reader paddle" not in msg, msg

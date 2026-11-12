@@ -31,8 +31,8 @@ def client():
         pytest.skip(problem)
     if problems := pdf_ocr.judge_setup_problems():
         pytest.skip("; ".join(problems))
-    args = pdf_ocr.parse_args(["x.pdf", "--reader", "paddle", "--judge", "--models-dir", str(models)])
-    c = WorkerClient(pdf_ocr.worker_command(args, "uv"), env=pdf_ocr.worker_environment())
+    spec = pdf_ocr.EngineSpec.from_options(pdf_ocr.parse_args(["x.pdf", "--reader", "paddle", "--judge"]))
+    c = WorkerClient(pdf_ocr.worker_command(spec, models, "uv"), env=pdf_ocr.worker_environment())
     try:
         c.start()
     except Exception as e:
