@@ -80,7 +80,7 @@ def test_paddle_without_the_judge_reads_the_scaled_box_with_four_pixels_of_margi
     assert calls == [DPI * 1.25, DPI * 0.8]
     for image, factor in zip(pipe.images, (1.25, 0.8)):
         assert np.array_equal(image, expect(factor, *EXPECTED[factor]))
-    assert notes == [{"bbox": list(BBOX), "original": "a"}]
+    assert [(box, note.text_before_reread) for box, note in notes] == [(tuple(BBOX), "a")]
 
 
 def test_paddle_without_the_judge_crops_at_the_size_the_render_really_has_when_the_cap_stopped_it_growing(monkeypatch):

@@ -127,26 +127,26 @@ def outcome(**kw):
     return BlockResult(**kw)
 
 
-def page(blocks, outcomes, raw=None, idx=0):
-    return pdf_ocr.page_json(idx, res_for(*blocks), {"scale": 3.0, "recovered": []}, raw or {}, [], outcomes)
+def page(blocks, notes):
+    return pdf_ocr.page_json(0, pdf_ocr.ReadPage(res_for(*blocks), 3.0, notes, 0, None), {}, [])
 
 
 def test_a_judged_block_carries_score_verdict_and_flag():
     o = outcome(judged=True, score=0.91, verdict="scored", flagged=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert (b["score"], b["verdict"], b["flagged"]) == (0.91, "scored", True)
 
 
 def test_a_block_the_judge_could_not_score_has_a_null_score_and_the_reason():
     o = outcome(judged=True, score=None, verdict="render_error", verdict_detail="render_failed", flagged=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["score"] is None and b["verdict"] == "render_error" and b["flagged"] is True
     assert b["verdict_detail"] == "render_failed"
 
 
 def test_charts_seals_and_figures_have_none_of_the_judge_fields():
     o = outcome(judged=False)
-    (b,) = page([block(block_label="chart")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_label="chart")], {(1, 2, 30, 40): o})["blocks"]
     assert not {"score", "verdict", "flagged", "verdict_detail"} & b.keys()
 
 
@@ -155,29 +155,29 @@ def test_without_outcomes_the_json_is_what_it_was_before_the_judge():
     assert set(b) == {"id", "order", "label", "content", "bbox", "polygon", "in_markdown"}
 
 
-def test_outcomes_are_matched_by_page_and_bbox_not_by_block_id():
+def test_notes_are_matched_by_box_not_by_block_id():
     o = outcome(judged=True, score=0.5, verdict="scored", flagged=True)
-    assert "score" in page([block(block_id=7)], {(3, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
-    assert "score" not in page([block(block_id=7)], {(2, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
+    assert "score" in page([block(block_id=7, block_bbox=[1.4, 2.6, 30.2, 40.9])], {(1, 2, 30, 40): o})["blocks"][0]
+    assert "score" not in page([block(block_id=7)], {(1, 2, 30, 41): o})["blocks"][0]
 
 
 def test_a_block_judged_before_the_document_was_known_to_be_traditional_is_marked():
     o = outcome(judged=True, score=0.9, verdict="scored", flagged=True, judged_before_script_decision=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["judged_before_script_decision"] is True
 
 
 def test_the_text_that_was_judged_is_recorded_when_it_differs_from_the_text_that_was_written():
     o = outcome(text="银行", judged=True, score=0.9, verdict="scored", flagged=True)
-    (b,) = page([block(block_content="銀行")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="銀行")], {(1, 2, 30, 40): o})["blocks"]
     assert b["judged_text"] == "银行"
-    (b,) = page([block(block_content="银行")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="银行")], {(1, 2, 30, 40): o})["blocks"]
     assert "judged_text" not in b
 
 
 def test_the_ink_reread_of_a_bridge_block_is_recorded_like_the_post_pass_one():
     o = outcome(text_before_reread="x")
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["content_before_reread"] == "x"
 
 
@@ -227,7 +227,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
                 Reading("x", 2, "greedy", None, 1.25, "page_render", "render_error", None, "render_failed")]
     o = outcome(text="你號", judged=True, score=0.93, verdict="scored", flagged=True, readings=readings,
                 stop_reason="exhausted", skipped_rounds=[{"round": 2, "reason": "r"}])
-    (b,) = page([block(block_content="你號")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="你號")], {(1, 2, 30, 40): o})["blocks"]
     assert (b["content"], b["score"], b["stop_reason"]) == ("你號", 0.93, "exhausted")
     assert b["readings"] == [
         {"content": "你好", "score": 0.4, "verdict": "scored", "round": 1, "decode": "greedy", "temperature": None,
@@ -241,7 +241,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
 
 def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rounds():
     o = outcome(judged=True, score=0.99, verdict="scored", flagged=False)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert not {"readings", "stop_reason", "stop_detail", "skipped_rounds"} & b.keys()
 
 

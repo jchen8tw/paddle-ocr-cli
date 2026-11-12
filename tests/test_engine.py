@@ -5,14 +5,11 @@ The Engine is built from the options by `fakes.engine_for`, with the PaddleX pip
 post-processing and the files are the real ones. No GPU, no models.
 """
 import json
-import types
 
-import numpy as np
 import pytest
 
 import pdf_ocr
 from fakes import INK_BOX, SETUPS, blank_pdf, engine_for, inked_pdf
-from reader_bridge import BlockQuery
 
 OPTIONS = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # these tests need the Judge's counters
 TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"
@@ -100,35 +97,19 @@ def test_with_paddleocr_vl_alone_the_lone_symbols_one_document_unwrapped_are_not
     assert in_the_same_engine == transcribe(alone_engine, second, tmp_path / "b2", [])
 
 
-class PreviousDocumentsPage:
-    """A page of the previous Document: anything that touches it is a leak."""
-
-    def original(self, bbox):
-        raise AssertionError("the previous Document's page was used")
-
-    crop = region = original
-
-
-def test_a_new_document_starts_on_page_one_without_the_previous_documents_page(tmp_path):
-    engine, _ = engine_for(OPTIONS, tmp_path)
-    engine.bridge.current_page, engine.bridge.page_source = 7, PreviousDocumentsPage()
-    engine.begin_document("ab" * 32)
-    q = BlockQuery("OCR:")
-    q.label, q.bbox = "text", (0, 0, 16, 8)
-    list(engine.bridge.predict([{"image": np.full((8, 16, 3), 255, np.uint8), "query": q}], max_new_tokens=8192))
-    assert list(engine.bridge.outcomes) == [(0, (0, 0, 16, 8))]  # not page 8
-    assert list(engine.bridge.scale_sources) == ["crop_resample"]  # the 1.25x Round never saw the old page
+@judged_setups
+def test_each_page_of_a_document_has_the_scores_of_its_own_blocks(tmp_path, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    texts = {"one": 0.61, "two": 0.62, "three": 0.63, "four": 0.64}  # the Blocks have the same boxes on every page
+    fakes.worker.scores = {text: ("scored", score) for text, score in texts.items()}
+    fakes.read_as(*texts)
+    doc, _ = transcribe(engine, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", setup.options)
+    blocks = [b for page in doc["pages"] for b in page["blocks"]]
+    assert [(b["content"], b["score"]) for b in blocks] == list(texts.items())
+    assert not any("judged_text" in b for b in blocks)
 
 
-def test_a_new_document_starts_without_the_ink_rereads_page(tmp_path):
-    engine, _ = engine_for(OPTIONS, tmp_path)
-    engine.ink.set_page(PreviousDocumentsPage())
-    engine.begin_document("ab" * 32)
-    reread = engine.ink.reread_with(None, types.SimpleNamespace(dpi=216, max_new_tokens=512))
-    assert reread(types.SimpleNamespace(label="text", bbox=(0, 0, 16, 8)), "a") is None
-
-
-# --- what the pipeline does to a Block after the Reader read it --------------------------------------------------------
+# --- what the pipeline does to a Block after the Reader read it -------------------------------------------------------
 
 SIMPLIFIED = "银行医院" * 5  # enough Simplified to keep the whole Document from being Traditional
 REPAIRED = "銀行醫院" * 5
