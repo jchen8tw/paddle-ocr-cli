@@ -1,7 +1,7 @@
 # pdf_ocr: PDF to Markdown, JSON and CSV with MiniCPM-OCR or PaddleOCR-VL, with a Score for every Block
 
-`pdf_ocr.py` converts a PDF into Markdown, a detailed JSON file and one CSV per table. It uses only
-the local models in `models/`:
+`pdf_ocr.py` converts a PDF, or every PDF in a folder, into Markdown, a detailed JSON file and one CSV per
+table. It uses only the local models in `models/`:
 
 | Model | Role |
 |---|---|
@@ -82,10 +82,11 @@ reason) and the run ends with a line saying so and suggesting `--no-judge` or `-
 ```bash
 uv run pdf_ocr.py input.pdf                         # -> output/<stem>/
 uv run pdf_ocr.py input.pdf -o out --pages 1-3,7,10-
+uv run pdf_ocr.py scans/                            # every PDF under scans/ -> output/scans/
 uv run pdf_ocr.py --help
 ```
 
-The output goes to `output/<pdf stem>/` unless you pass `-o`:
+The output of a PDF goes to `output/<pdf stem>/` unless you pass `-o`:
 
 ```
 <stem>.md      Markdown: headings, paragraphs, HTML tables, LaTeX formulas, <!-- page N --> markers
@@ -97,15 +98,116 @@ csv/           one CSV per valid table: pNNN_tableKK.csv (only if there are any)
 If any page fails, the run still finishes. The failure is recorded in the JSON (`source.pages_failed`)
 and in the Markdown, and the exit code is 1.
 
+### A folder of PDFs
+
+Pass a folder instead of a PDF and one run transcribes every PDF under it. Each PDF is a Document. The models
+load once, then the Documents go through one at a time.
+
+```bash
+uv run pdf_ocr.py scans/            # -> output/scans/
+uv run pdf_ocr.py scans/ -o results # -> results/
+uv run pdf_ocr.py .                 # the current directory; the default output/<its name>/ may lie inside it
+```
+
+Finding the Documents:
+- The whole tree is searched. A file is a Document when its name ends in `.pdf`, in any case (`.PDF`, `.Pdf`).
+  The contents are not checked.
+- A file or folder whose name starts with `.` is skipped, at any depth: `.git`, `.Trash`, and the `._report.pdf`
+  files macOS leaves on other disks.
+- A symlink to a PDF counts as that PDF. A symlinked folder is not entered, so a link loop or a link out of the
+  tree can neither make the run endless nor pull in other PDFs.
+- The same PDF at two paths is two Documents.
+- The Documents go in sorted order of their path relative to the folder, folder by folder (`a/z.pdf`, then
+  `a-b.pdf`, then `a.pdf`), so two runs of one folder behave alike.
+
+The output root is `-o`, or `output/<name of the folder>/` (`.` gives the name of the current directory). A
+Document at `<sub>/<name>.pdf` writes to `<root>/<sub>/<name>/`, with the files of a single PDF inside:
+
+```
+output/scans/
+├── invoice/                  scans/invoice.pdf
+│   ├── invoice.md
+│   ├── invoice.json
+│   └── csv/
+└── 2024/q1/report/           scans/2024/q1/report.pdf
+    ├── report.md
+    ├── report.json
+    ├── imgs/
+    └── csv/
+```
+
+A Document's `.md`, `.json` and CSVs are the same as a run on that PDF alone gives, down to the byte, except
+`elapsed_seconds`: it counts the Document's own time, without the model load that the Documents share.
+`source.file` is the bare file name, as for a single PDF. `--pages` cannot be used with a folder, since the
+Documents differ in length.
+
+Before any model loads, and with nothing written, the run stops with an error when:
+- the folder holds no Documents;
+- two Documents would write to one output folder (`a.pdf` and `a.PDF` side by side);
+- a Document's output folder would lie inside another's `imgs/` or `csv/` (`a.pdf` and `a/csv/b.pdf`).
+
+The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, worker
+environment, the Judge's renderer) come next and also stop the run before the first Document.
+
+A PDF that cannot be opened, or has no pages, is reported, counted as failed and gets no JSON, and the run goes
+on. A Document whose pages fail is written as for a single PDF. The exit code is 1 if any Document or any page
+failed, and 0 otherwise (a skipped Document is never a failure). On stderr, a folder run prints how many Documents it
+found and how many of them are already done (see "Running a folder again"), a note for each of those, `model load: Ns`
+once, a header `[i/n] <relative path> (<pages> pages)` before each processed Document's page lines and its `wrote ...`
+line, and at the end the count and one line for each failure. `i` is the Document's place among all the Documents
+found and `n` their number, whether or not the others are skipped. The notes of the skipped Documents come together
+right after the `found` line, before anything is loaded, so the headers that follow skip those numbers:
+
+```
+found 4 Documents in scans (2 already done)
+[1/4] 2023/old.pdf skipped: already done
+[4/4] invoice.pdf skipped: already done
+...
+model load: 31.2s
+[2/4] 2024/q1/report.pdf (12 pages)
+...
+[3/4] broken.pdf FAILED: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
+4 Documents: 1 written, 2 skipped, 1 failed
+  broken.pdf: cannot open scans/broken.pdf: Failed to load document (PDFium: Data format error).
+```
+
+A Document with failed pages is counted as written, and the lines after the count name its failed pages
+(`2024/q1/report.pdf: pages 3, 7 failed (recorded in its JSON)`).
+
+#### Running a folder again
+
+A run on a folder skips the Documents that are already done. An interrupted run therefore picks up where it
+stopped, and after you add PDFs to the folder only the new ones are processed. A Document is done when its
+`<name>.json` in the output folder reads cleanly and all of these hold:
+- `source.sha256` is the PDF's sha256: the PDF has not changed.
+- `source.pages_failed` is empty: a Document with failed pages is tried again.
+- `settings` equals the `settings` this run would write. Any option that shapes the output (`--reader`, `--dpi`,
+  `--judge-threshold`, `--no-judge`, `--script`, `--no-page-markers`, `--no-csv`, ...) therefore makes every
+  Document count as not done; options that do not (`-v`, `--device`, `--models-dir`) change nothing.
+- The Engine's models are the same: `engine.layout_model`, `engine.reader` and, with the Judge, `engine.judge`.
+
+Library versions and the device are not compared, so a `uv sync` or another GPU redoes nothing. A JSON that is
+missing, cut off by a kill, not JSON, or missing one of the fields above makes the Document not done. A PDF that
+could not be opened has no JSON, so the next run tries it again. A skipped Document is not touched.
+
+The check reads the JSONs and hashes the PDFs, and nothing else. When every Document is done, the run prints the
+summary and exits 0 without the setup checks and without loading a model, in seconds. The collisions of output
+folders are still checked among all the Documents, the skipped ones included.
+
+`--force` redoes every Document of the folder. Use it after a change the check cannot see, such as different
+weights placed under the same model folder names. A single PDF is always transcribed and overwrites its output, and
+`--force` with one is a usage error.
+
 ### Options
 
 | Option | Default | What it does |
 |---|---|---|
-| `-o, --output-dir` | `output/<stem>` | where to write the results |
+| `-o, --output-dir` | `output/<stem>` | where to write the results. For a folder it is the output root: `output/<folder name>` by default, with one subfolder per Document (see "A folder of PDFs") |
 | `--models-dir` | `./models` | folder containing `PP-DocLayoutV3/` and the Reader's folder (`MiniCPM-OCR-1.0/`, or `PaddleOCR-VL-1.6/` with `--reader paddle`) |
-| `--pages` | all | 1-based page selection, e.g. `1-3,7,10-` |
+| `--pages` | all | 1-based page selection, e.g. `1-3,7,10-`. Not with a folder |
+| `--force` | | with a folder: transcribe every Document again, also the ones already done (see "Running a folder again"). Not with a single PDF |
 | `--device` | `gpu:0` if available | Paddle device, e.g. `cpu` |
-| `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added; the JSON only gains a `reader` field in `engine` and `settings` |
+| `--reader {minicpm,paddle}` | `minicpm` | the model that reads each block: MiniCPM-OCR-1.0 (through the torch worker) or PaddleOCR-VL-1.6. With `paddle` the Markdown, the CSVs and the blocks in the JSON are the same as before MiniCPM was added, except that lone LaTeX symbols are written as their character (see "The MiniCPM-OCR-1.0 Reader") and, in a Traditional document, `≥`/`≤` as `≧`/`≦`; the JSON only gains a `reader` field in `engine` and `settings` |
 | `--dpi` | 216 | page render resolution (144, the official SDK's value, was slightly worse and not faster with MiniCPM; see "Tuning notes") |
 | `--layout-threshold` | 0.2 | layout score threshold; lower finds more blocks but too low invents boxes |
 | `--max-new-tokens` | 8192 | decoding limit per block; raise it for very large tables. With MiniCPM it is the limit for tables only (see "The MiniCPM-OCR-1.0 Reader") |
@@ -116,7 +218,7 @@ and in the Markdown, and the exit code is 1.
 | `--no-judge` | | do not score blocks (no Judge, no `playwright`, `node` or Noto Sans CJK needed). The ink-based re-read of short blocks runs instead |
 | `--judge-threshold FLOAT` | 0.5 | a number from 0 to 1 (anything else is rejected); blocks whose first Reading scores below this are re-read (up to 10 Readings, stopping after a round that reads no new text; see "Re-reading low-Score Blocks") and marked `flagged` in the JSON and counted per page on stderr. A re-read never clears the flag, and a block whose first Reading could not be scored is flagged too. The Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain; 0.5 is calibrated on one document (see "Tuning notes"). `0` keeps the Scores and re-reads nothing |
 | `--no-recover` | | with `--no-judge`, turn off the truncated-block re-read. With the Judge on that re-read never runs |
-| `--script {auto,off}` | `auto` | Simplified to Traditional repair; `off` keeps the raw model output |
+| `--script {auto,off}` | `auto` | Simplified to Traditional repair, which also writes `≥`/`≤` as `≧`/`≦`; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |
 | `--no-merge-tables` | | keep a table that continues over a page break as separate per-page tables in the Markdown and CSV |
 | `--no-csv` | | do not write `csv/` |
@@ -133,16 +235,25 @@ The JSON has these top-level keys:
   and the device. Whenever the worker runs (MiniCPM, or the Judge) it also has the `torch`, `transformers`,
   `playwright` and `pillow` versions.
 - `settings`: every option that affects the output, including `reader`, `judge` and `judge_threshold` (null
-  with `--no-judge`). With the Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can
-  do each one: `supported`) and `max_readings_per_block`.
-- `postprocessing`: what the clean-up steps changed (with MiniCPM, also `repetition_cuts`; with the Judge, a
-  `judge` summary: `blocks_judged`, `blocks_reread`, `blocks_flagged` (the first Reading scored below the threshold
-  or could not be scored, whatever the re-read found), `reread_stop_reasons` (a count per `stop_reason`, such as
-  `passed`, `no_new_text` or `exhausted`), `readings_beyond_the_first` (every extra
-  Reading made, duplicates included), a count per verdict, and how many blocks were judged before the document
-  was known to be Traditional).
+  with `--no-judge`), `script` (`"auto"` or `"off"`, from `--script`) and `page_markers` (`false` with
+  `--no-page-markers`). `postprocessing.script_repair` still records what the repair actually did. With the
+  Judge, also `reread_schedule` (the four rounds, with whether this run's Reader can do each one: `supported`)
+  and `max_readings_per_block`. A folder run compares `settings` and the model names of `engine` with its own to
+  decide whether a Document is already done (see "Running a folder again").
+- `postprocessing`: what the clean-up steps changed (whenever the worker runs, also `repetition_cuts`; with the
+  Judge, a `judge` summary: `blocks_judged`, `blocks_reread`, `blocks_flagged` (the first Reading
+  scored below the threshold or could not be scored, whatever the re-read found), `reread_stop_reasons` (a count per
+  `stop_reason`, such as `passed`, `no_new_text` or `exhausted`), `readings_beyond_the_first` (every extra Reading
+  made, duplicates included), a count per verdict, and how many blocks were judged before the document was known to
+  be Traditional). `latex_symbols_unwrapped` counts the lone LaTeX symbols written as their character (see
+  "The MiniCPM-OCR-1.0 Reader"). Whenever the worker runs (MiniCPM, or the Judge) it counts every Reading cleaned,
+  re-reads included, as `repetition_cuts` does. With `--reader paddle --no-judge` it counts the symbols in the
+  written blocks. In `script_repair`, `applied` is true when the document was decided Traditional, and
+  `blocks_changed` counts the blocks the repair changed, whether for a Simplified character or only for a `≥`/`≤`
+  glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`.
 - `csv_tables`: which tables were exported and which were skipped.
-- `elapsed_seconds`.
+- `elapsed_seconds`: for a single PDF, counted from the start of the model load. In a folder run, the Document's
+  own time, without the shared model load.
 - `pages`.
 
 Each page lists its `blocks`, each with these fields:
@@ -275,14 +386,28 @@ PaddleOCR-VL is right or better in all 10:
 - **MiniCPM loses on rare Traditional characters.** 躉 became 蔓, 薈 or (after a re-read) 薑 in three footnotes,
   鑽 became 鑛, 閣 became 閤, 績 became 續, 寶 became 實, 屆 became 居: 9 wrong characters in 8 Blocks, all read
   correctly by PaddleOCR-VL. The same 躉 weakness shows on the brochure below.
-- **MiniCPM writes symbols as LaTeX.** On page 38 `≧` came out as `$\geq$` or `\geq` in three text Blocks (16
-  errors against PaddleOCR-VL's 9, which also wrapped two of them in `$`). The official SDK has a LaTeX repair
-  for this; it is not ported (issue #7).
+- **MiniCPM writes symbols as LaTeX.** On page 38, 16 of its 17 errors (PaddleOCR-VL: 9) were LaTeX in three text
+  Blocks. One Block held a lone symbol, `(n) \( \geq \) 10` for the printed `(n)≧10` (6 errors). One held an inline
+  formula, `$ t \geq 10 $` for `t≧10` (6). One held `$ t= $` and `$ t $` around plain letters (4). PaddleOCR-VL
+  wrote the first as `≥` (1 error, the wrong glyph) and wrapped the other two in `$` as well. The official SDK's
+  LaTeX repair does not fix this. It fixes only formula syntax, in formula Blocks, and has no table of symbols. The
+  tool now writes a lone symbol as its character, and `≥`/`≤` as `≧`/`≦` in a Traditional document
+  ([issue #7](https://github.com/jchen8tw/paddle-ocr-cli/issues/7); see "The MiniCPM-OCR-1.0 Reader"). That fixes
+  the first Block for both Readers. The other two hold more than one symbol and are left as they are. The counts
+  in this section were measured before that step; "After issue #7" below has the new ones.
 - **MiniCPM wins on Simplified drift.** PaddleOCR-VL wrote 16 Simplified characters (资 别 项) into the
   Traditional text, in 16 Blocks, all fixed by `--script auto`; without that repair they would be 16 more errors.
   MiniCPM wrote none in these runs (0 repairs), and 1 at 144 DPI.
 - **MiniCPM needs less memory when it reads alone** (5,408 MiB against 9,657 MiB) but is 24 % slower (234 s
   against 188 s).
+
+**After issue #7** (lone LaTeX symbols written as their character, `≧`/`≦` in a Traditional document). With each
+Reader's defaults (Judge on, threshold 0.5, 216 DPI), MiniCPM has 27 wrong characters (0.163 %, was 33) and
+PaddleOCR-VL 18 (0.109 %, was 19). One run each, before and after, 2026-11-11. Of the 321 Blocks, the only one whose
+text changed is page 38's `(n)≧10`, for both Readers. Page 38 goes from 17 to 11 errors for MiniCPM and from 9 to 8
+for PaddleOCR-VL, and no page has more errors than before. What is left on page 38 is the inline math around
+`t≧10` and `t=` described above (10 errors for MiniCPM, 8 for PaddleOCR-VL) and 閣 read as 閤. The Judge's Score of
+MiniCPM's changed Block went from 0.79 to 0.92. Wall time did not change (373 s and 305 s).
 - **Dropped Blocks: none.** Neither Reader returned an empty Reading for a Block with text, and 1 text-layer
   character lies in no Block (the layout model is shared). One footnote on page 52 loses its last phrase
   (`保額：新台幣10萬`) under both Readers although the Block's box covers it; the cause was not found.
@@ -366,7 +491,9 @@ Block sets differ (320 against 321 Blocks): a small difference, not a measured c
 
 - **Repetition cuts: 0** in every MiniCPM run on the 21 pages and on the brochure. The loop cut was therefore not
   exercised by this document (its tests use synthetic loops). **Script repairs on MiniCPM output: 0** (1 character
-  at 144 DPI); on PaddleOCR-VL output 16 characters.
+  at 144 DPI); on PaddleOCR-VL output 16 characters. Since issue #7 the repair also writes one `≥` as `≧` on page
+  38 for each Reader (`big5_symbols_changed`: 1), and `latex_symbols_unwrapped` is 1 for MiniCPM and 0 for
+  PaddleOCR-VL, which wrote that `≥` directly.
 - **Time.** The Judge adds 81 s to the 21 pages with MiniCPM (234 s to 315 s, 3.9 s per page) and 122 s with
   PaddleOCR-VL (188 s to 311 s, including its 46 re-reads). Default MiniCPM takes 340 to 341 s, about 16 s per page.
 - **GPU memory.** The whole card peaked at 9,296 to 10,406 MiB with the Judge on, 5,408 MiB for MiniCPM without the
@@ -400,10 +527,10 @@ for both Readers, so the comparison rests on about 5,000 characters and 12 wrong
 rank the Readers differently, and a scanned document was not measured at all. Table structure, merged cells and
 reading order are not scored by `ocr_eval.py`. Scores are not promised to be the same on another GPU.
 
-Follow-ups these measurements suggest are filed as issues, not done here: the LaTeX repair (#7), best-of-N or
-disagreement flags across Readers (#8), the re-read clearing a wrong Block's flag (#9), per-label thresholds (#10),
-re-measuring the Reader choice on more documents (#11), scoring table structure and formulas (#12), the dropped
-footnote phrase on page 52 (#13) and the brochure's heading and picture text (#14).
+Follow-ups these measurements suggest are filed as issues, not done here: the symbols written as LaTeX (#7, done
+since), best-of-N or disagreement flags across Readers (#8), the re-read clearing a wrong Block's flag (#9),
+per-label thresholds (#10), re-measuring the Reader choice on more documents (#11), scoring table structure and
+formulas (#12), the dropped footnote phrase on page 52 (#13) and the brochure's heading and picture text (#14).
 
 ## Design choices
 
@@ -434,6 +561,9 @@ Each change and the reason for it:
    characters, and no more than 15 % of the script-specific characters Simplified. Even then it changes only
    characters that cannot be encoded in Big5 and that OpenCC maps to another form. A blanket OpenCC conversion
    would also rewrite valid Traditional characters such as 台→臺 and 后→後. Formula blocks are never touched.
+   The same Big5 rule picks the glyph of `≥` and `≤`. Neither is in Big5, so in a document decided Traditional the
+   repair writes them as `≧` and `≦`, the Big5 forms that the measurement document prints. It does so also in a
+   block that has no Simplified character.
 4. **Truncated-block re-read** (both; with the Judge on it is replaced by the Judge's re-reading). Now and then
    PaddleOCR-VL returns a few characters for a whole paragraph, and it does so every time for the same input. The
    tool estimates from the ink how many glyphs a text block holds. If the recognised text has fewer than 35 % of
@@ -474,13 +604,22 @@ The raw Reading is then cleaned in this order:
 
 1. **Repetition cut.** A Reading that falls into a loop is cut back (ported from the official MiniCPM-OCR
    SDK). The JSON counts the cuts in `postprocessing.repetition_cuts`.
-2. **OTSL to HTML.** MiniCPM writes tables in OTSL. They are converted with the same converter PaddleX uses.
-3. **Table line breaks.** MiniCPM writes an in-cell line break as a *real* newline (PaddleOCR-VL writes a
+2. **Lone symbols.** In a text block, a printed symbol that the Reader wrote as a LaTeX command becomes its
+   character: `$\geq$`, `$ \geq $`, `\(\geq\)` and a bare `\geq` all become `≥`, with no space added. The step
+   runs after the pipeline's rewrite of `\(...\)` into ` $ ... $ `, and drops the space that rewrite puts before
+   the symbol. The commands are those in `minicpm_reader.LATEX_SYMBOLS`, such as `\geq`, `\leq`, `\geqq`, `\neq`,
+   `\times`, `\div`, `\pm`, `\approx`, `\%`, `^\circ` and `\rightarrow`. A command counts only when no letter
+   follows it, so `\left(` and `\top` stay as they are. A math span that holds more than the symbol (`$x \geq 5$`)
+   and display math stay too, and so do formula, `formula_number`, `algorithm`, table, chart and seal blocks. The
+   JSON counts the symbols in `postprocessing.latex_symbols_unwrapped`. PaddleOCR-VL's Readings get the same step.
+   The bridge does it when the Judge runs, and `pdf_ocr.py` does it after the pipeline with `--no-judge`.
+3. **OTSL to HTML.** MiniCPM writes tables in OTSL. They are converted with the same converter PaddleX uses.
+4. **Table line breaks.** MiniCPM writes an in-cell line break as a *real* newline (PaddleOCR-VL writes a
    literal `\n`). Both become `<br>`, so the CSV keeps the line break inside the cell. This happens inside
    the Reader, so `postprocessing.tables_with_line_breaks_fixed` (the count of the literal `\n` fix) stays 0
    with MiniCPM.
-4. **Simplified to Traditional repair**, as for PaddleOCR-VL. It is document-level and runs after all
-   pages, which is why it comes after the Reader and not inside it.
+5. **Simplified to Traditional repair**, as for PaddleOCR-VL, with the `≧`/`≦` glyphs. It is document-level and
+   runs after all pages, which is why it comes after the Reader and not inside it.
 
 The truncated-block re-read (`--no-recover`) also works with MiniCPM, but only without the Judge (`--no-judge`).
 
@@ -488,10 +627,11 @@ What differs from PaddleOCR-VL in the text. Seen on a digital-born proposal PDF 
 document (not seen on it, where full-width forms are normalised away and nothing of the kind showed up in the
 errors): MiniCPM keeps the printed spacing around Latin letters and digits (`表 1-1`, `OCR 及`), writes `[...]` for
 the printed `〔...〕`, and uses `(...)` for full-width brackets inside table cells. Seen on the measurement
-document: it writes inline symbols such as `≧` as LaTeX (`$\geq$`), misreads some rare Traditional characters
-(躉, 鑽, 閣, 績, 寶, 屆) that PaddleOCR-VL reads correctly, and does not drift into Simplified characters the
-way PaddleOCR-VL does. It can also misread the odd character the repair cannot fix: on the proposal, `爰` came out as
-the Simplified `爱`, which the repair turned into `愛`. Numbers are in "Tuning notes".
+document: it writes inline symbols such as `≧` as LaTeX (`$\geq$`, which the clean-up above unwraps), misreads
+some rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) that PaddleOCR-VL reads correctly, and does not drift
+into Simplified characters the way PaddleOCR-VL does. It can also misread the odd character the repair cannot fix:
+on the proposal, `爰` came out as the Simplified `爱`, which the repair turned into `愛`. Numbers are in
+"Tuning notes".
 
 The measurements of this Reader against PaddleOCR-VL are in "Tuning notes" above.
 
@@ -531,9 +671,10 @@ again, up to nine more times, and the best Reading is kept (next section).
 - **Same text as written, give or take one space.** Before a Reading is judged it gets the same clean-up it gets for the output:
   the repetition cut, `\(...\)` and `\[...\]` rewritten to ` $ ... $ ` / ` $$ ... $$ ` (the pipeline does that
   anyway, afterwards; with the delimiters rewritten a Reading scored 0.9895 against 0.9951 for the raw `\(...\)`
-  form on the SDK's text example, and both render as math), OTSL converted to HTML for tables, line breaks inside
-  table cells turned into `<br>`, and the Simplified to Traditional repair (below). Raw OTSL scored about 0.0005 for
-  a correct table, which is why tables go to the Judge as HTML. The one difference: the pipeline's rewrite turns the
+  form on the SDK's text example, and both render as math), lone LaTeX symbols in text blocks written as their
+  character, OTSL converted to HTML for tables, line breaks inside table cells turned into `<br>`, and the
+  Simplified to Traditional repair (below). Raw OTSL scored about 0.0005 for a correct table, which is why tables
+  go to the Judge as HTML. The one difference: the pipeline's rewrite turns the
   model's `\[ x \]` into `$$  x  $$` (two spaces, since the model already spaces its formulas), and the real Judge
   rated that 0.73 where `$$ x $$`, which renders the same in the Markdown, got 0.97 (SDK formula example). So the Judge
   is shown a formula with single spaces inside `$`/`$$`; the written text keeps what the pipeline writes.
@@ -547,9 +688,10 @@ again, up to nine more times, and the best Reading is kept (next section).
 document-level: it needs the whole document to decide the document is Traditional (at least 30 Traditional-only
 characters and at most 15 % Simplified). The Judge works per Block, so the decision is made on the Readings seen so
 far, in the order the pipeline hands the Blocks over, and stays made: once the rule holds, every later Reading is repaired before it is judged.
-The Reading that completes the evidence is repaired too. Same input in the same order always gives the same
-decision. The document-level repair still runs afterwards on the original Readings, exactly as before, so the
-written text is unchanged by the Judge. Two consequences, both recorded in the JSON:
+The Reading that completes the evidence is repaired too. From then on the Judge also sees `≥` and `≤` as `≧` and
+`≦`. Same input in the same order always gives the same decision. The document-level repair still runs afterwards
+on the original Readings, exactly as before, so the written text is unchanged by the Judge. Two consequences, both
+recorded in the JSON:
 
 - A Block read *before* the decision was judged unrepaired, so its Score may describe the pre-repair text. Those
   Blocks have `judged_before_script_decision: true`. On the stand-in this was the first four Blocks of the first
@@ -695,8 +837,8 @@ timeout, so a stuck worker cannot hang the run.
   these numbers do not carry over, and a scanned document was not measured at all. Re-check `--judge-threshold`
   on your own documents (`ocr_eval.py` needs a text layer; the JSON's `score` and `flagged` do not).
 - **On the measurement document MiniCPM, the default Reader, read fewer characters right than PaddleOCR-VL**
-  (35 against 19 wrong of 16,586), mostly rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) and inline
-  symbols written as LaTeX (`≧` as `$\geq$`). It needs about half the GPU memory when it reads alone and does not drift into Simplified
+  (27 against 18 wrong of 16,586 with the defaults), mostly rare Traditional characters (躉, 鑽, 閣, 績, 寶, 屆) and
+  short inline math written as LaTeX around printed text (`$ t \geq 10 $` for `t≧10`). It needs about half the GPU memory when it reads alone and does not drift into Simplified
   characters. `--reader paddle` is a reasonable choice for a Traditional document where those characters matter.
 - **The Judge is a weak error detector.** At the default 0.5 it flags 14 % of the Blocks and about half of the
   Blocks with an error; a correct Reading often scores low (one-line product names, figure titles), and a re-read can
@@ -748,7 +890,11 @@ unsupported rounds, seeds), the re-read rounds through the bridges (`tests/test_
 repair, the Judge's verdicts with a fake renderer and model, the renderer's setup checks and fontconfig, the
 bridges, the JSON fields, the prompt and token limit of each block label, the
 clean-up of a Reading, the worker's request loop, the client's start-up, timeout and crash handling (against
-a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, and the `--reader` options.
+a stand-in worker, `tests/fake_worker.py`), the bridge and the hook, the `--reader` options, and folder runs: which
+Documents a folder holds and where each one writes (`tests/test_folder_plan.py`), which of them are already done
+(`tests/test_folder_done.py`), the `settings` and the Engine's model names known from the options alone
+(`tests/test_options_only.py`), what is refused before any model loads, and the loop over the Documents with a fake
+Engine, skipping, an output root inside the folder and a worker crash included (`tests/test_cli_folder.py`).
 
 The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer; except the reference-example
 test), the models, the worker environment (the Judge runs in it for either Reader) and the Judge's setup:
@@ -758,6 +904,13 @@ test), the models, the worker environment (the Judge runs in it for either Reade
   names the hook uses.
 - `tests/test_worker_crash.py` runs the whole CLI with a stand-in worker that crashes: the page it was reading
   is recorded as failed, and the next page gets a new worker.
+- `tests/test_folder_run.py` runs the CLI on a folder with the default Reader and the Judge at
+  `--judge-threshold 0.98`: two 2-page PDFs cut from the sample (one in a subfolder) and a corrupt PDF. Each good
+  Document's Markdown, JSON (apart from `elapsed_seconds`) and CSVs must equal a run on that PDF alone, the corrupt
+  file must be reported, the models load once and the exit code is 1. Then it deletes the corrupt PDF, which is
+  never done, and runs the folder again into the same output: both Documents are skipped, no model loads and the
+  exit code is 0; and once more with `--force`, which redoes both with the output they had. It runs one CLI process
+  after another, so it takes the time of five runs.
 - `tests/test_e2e.py` runs the CLI twice with the Judge on, plus once with `--no-judge` and once with
   `--judge-threshold 0` (Judge on, nothing re-read, whose Markdown must equal the `--no-judge` one), for each
   Reader, on a few pages. It checks the output structure (the same for both Readers), that every judged Block has a `score`, a
@@ -798,8 +951,9 @@ structure.
 
 `tests/baseline.json` holds the recorded baseline: the document (name, sha256, pages), the error rate measured for each
 Reader with its default options, and the bound the end-to-end test enforces (`minicpm` 0.25 %, `paddle` 0.20 %:
-the measured rate plus 0.05 percentage points, rounded up to the next 0.05). The measured rates are 0.199 % (33 of
-16,586 characters) for MiniCPM and 0.115 % (19) for PaddleOCR-VL. **This is not the original 21-page sample**, which
+the measured rate plus 0.05 percentage points, rounded up to the next 0.05). The measured rates, after issue #7, are
+0.163 % (27 of 16,586 characters) for MiniCPM and 0.109 % (18) for PaddleOCR-VL. The rule gives the same bounds as it
+did for the earlier 0.199 % and 0.115 %. **This is not the original 21-page sample**, which
 is not available; the numbers are not comparable with the 0.40 % in "Earlier tuning". To reproduce them:
 
 ```bash

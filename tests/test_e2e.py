@@ -35,7 +35,7 @@ def test_output_structure(cli_runs, sample_pdf, pages, reader):
     assert doc["engine"]["judge"] == "MiniCPM-OCR-Jev"
     assert "torch" in doc["engine"] and "transformers" in doc["engine"]  # the worker runs the Judge for either Reader
     assert doc["settings"]["judge"] is True and doc["settings"]["judge_threshold"] == DEFAULT_JUDGE_THRESHOLD
-    assert {"tables_with_line_breaks_fixed", "script_repair"} <= doc["postprocessing"].keys()
+    assert {"tables_with_line_breaks_fixed", "latex_symbols_unwrapped", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []
     assert len(doc["pages"]) == len(doc["source"]["pages_processed"]) > 0
@@ -117,6 +117,7 @@ def test_no_judge_gives_no_scores_and_records_that_the_judge_was_off(cli_run_no_
     assert doc["settings"]["judge"] is False and doc["settings"]["judge_threshold"] is None
     assert doc["settings"]["reread_short_blocks"] is True  # the ink-based re-read runs instead
     assert "judge" not in doc["engine"] and "judge" not in doc["postprocessing"]
+    assert "latex_symbols_unwrapped" in doc["postprocessing"]  # for --reader paddle, counted without a bridge
     assert doc["source"]["pages_failed"] == []
     for page in doc["pages"]:
         for b in page["blocks"]:

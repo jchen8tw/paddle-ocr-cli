@@ -84,6 +84,16 @@ def test_the_judge_sees_repaired_text_once_the_document_is_known_to_be_tradition
     assert b.outcomes[(1, (0, 0, 1, 1))].text_before_repair == "银行"
 
 
+def test_the_judge_sees_a_lone_symbol_unwrapped_and_as_its_big5_glyph_once_the_document_is_traditional(tmp_path):
+    client = FakeClient()
+    b = minicpm(client, tmp_path, repair=StickyScriptRepair(ScriptRepair()))
+    for page, reading in enumerate([r"年滿15足歲$\geq$者", TRAD, r"年滿15足歲$\geq$者"]):
+        client.texts["Text Recognition:"] = reading
+        read_page(b, [item("OCR:", "text", (0, 0, 1, 1))], page=page)
+    assert [call[0]["text"] for call in client.score_calls] == ["年滿15足歲≥者", TRAD, "年滿15足歲≧者"]
+    assert b.outcomes[(2, (0, 0, 1, 1))].text_before_repair == "年滿15足歲≥者"
+
+
 def test_a_worker_that_fails_to_score_is_a_forward_error_not_a_failed_page(tmp_path):
     client = FakeClient({"Text Recognition:": "words"}, fail_score=WorkerError("the worker stopped (exited with code 3)"))
     b = minicpm(client, tmp_path)

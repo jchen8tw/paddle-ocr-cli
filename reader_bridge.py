@@ -257,7 +257,8 @@ class _MiniCPMRead:
     def __init__(self, client, crops: CropFiles | None, table_limit: int):
         self.client, self.crops, self.table_limit = client, crops, table_limit
 
-    def supports(self, step) -> bool:
+    @staticmethod
+    def supports(step) -> bool:
         return True
 
     def read(self, requests, step, seeds):
@@ -288,7 +289,8 @@ class _PaddleRead:
     def __init__(self, model, kwargs: dict, before, after):
         self.model, self.kwargs, self.before, self.after = model, kwargs, before, after
 
-    def supports(self, step) -> bool:
+    @staticmethod
+    def supports(step) -> bool:
         return step.decode == "greedy"
 
     def read(self, requests, step, seeds):
@@ -312,14 +314,23 @@ class _PaddleRead:
         return [[r.get("result") or ""] for r in results]
 
 
+READERS = {"minicpm": _MiniCPMRead, "paddle": _PaddleRead}  # by the name --reader takes
+
+
+def reader_supports(reader: str):
+    """The `supports` of the Reader that --reader names, for when there is no bridge (no worker has started): the
+    function the bridge's own Reader answers with."""
+    return READERS[reader].supports
+
+
 class ReaderBridge:
     """The pipeline's `vl_rec_model`: reads a page's Blocks with a Reader, and (with `judge`) scores them.
 
     All the work is block_reader.read_blocks; this class is the glue to the pipeline and the worker. Each
-    Reading is cleaned here (repetition cut, math delimiters, OTSL to HTML, table line breaks) so the
-    pipeline's own post-processing, which repeats those steps, finds nothing left to do, and the Judge
-    scores exactly the text that is written. `outcomes` maps (page index, bbox) to the Block's BlockResult;
-    set `current_page` before each `pipe.predict`.
+    Reading is cleaned here (repetition cut, math delimiters, lone symbols, OTSL to HTML, table line breaks), so
+    the pipeline's own post-processing finds nothing left to do and the Judge scores exactly the text that is
+    written. `outcomes` maps (page index, bbox) to the Block's BlockResult; set `current_page` before each
+    `pipe.predict`.
     """
 
     batch_sampler = types.SimpleNamespace(batch_size=1)  # only read when the pipeline uses queues
@@ -329,20 +340,28 @@ class ReaderBridge:
                  repair=None, ink_reread=None, doc_hash: str = ""):
         self.client, self.tmp_dir, self.to_html = client, Path(tmp_dir), to_html
         self.judge, self.threshold, self.repair, self.ink_reread = judge, judge_threshold, repair, ink_reread
+        self.begin_document(doc_hash)
+
+    def begin_document(self, doc_hash: str = "") -> None:
+        """Forget what the previous Document left here; the worker, the schedule and the options stay."""
         self.doc_hash = doc_hash  # with the page and the Block, what the sampling seeds of the re-read rounds are made of
         self.repetition_cuts = 0
+        self.symbols_unwrapped = 0
         self.current_page = 0
         self.scale_sources: dict[str, int] = collections.Counter()  # scaled images made, by where they came from
         self.page_source = None  # set per page by the caller: lets round 2 re-render the page (see BlockScaler)
         self.outcomes: dict[tuple, block_reader.BlockResult] = {}
+        if self.repair is not None:
+            self.repair.reset()
 
     def _reader(self, kwargs: dict, crops: CropFiles):  # a block_reader.Reader
         raise NotImplementedError
 
     def _clean(self, raw: str, label: str) -> str:
-        text, cut = minicpm_reader.clean_reading(raw, label, to_html=self.to_html, strip=self.strip)
-        self.repetition_cuts += cut
-        return text
+        cleaned = minicpm_reader.clean_reading(raw, label, to_html=self.to_html, strip=self.strip)
+        self.repetition_cuts += cleaned.repetition_cut
+        self.symbols_unwrapped += cleaned.symbols_unwrapped
+        return cleaned.text
 
     def predict(self, inputs, **kwargs):
         inputs = list(inputs)
