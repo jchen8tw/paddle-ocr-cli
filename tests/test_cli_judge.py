@@ -1,5 +1,6 @@
 """The Judge's command line, the JSON it adds and the stderr line (no GPU, no models)."""
 import types
+from pathlib import Path
 
 import pytest
 
@@ -51,11 +52,8 @@ def test_the_judge_needs_its_model_folder_only_when_it_is_on(tmp_path):
     assert "MiniCPM-OCR-Jev" not in pdf_ocr.missing_models_message(spec(), tmp_path)
 
 
-def test_the_worker_is_needed_for_minicpm_or_for_the_judge_and_loads_only_what_is_used():
-    assert not pdf_ocr.needs_worker(args()) and not pdf_ocr.needs_worker(args("--no-judge"))
-    assert pdf_ocr.needs_worker(args("--reader", "minicpm")) and pdf_ocr.needs_worker(args("--judge"))
-    assert pdf_ocr.needs_worker(args("--reader", "minicpm", "--judge"))
-    cmd = lambda *a: pdf_ocr.worker_command(args("--models-dir", "/m", *a), uv="/usr/bin/uv")
+def test_the_worker_loads_only_what_is_used():
+    cmd = lambda *a: pdf_ocr.worker_command(spec(*a), Path("/m"), uv="/usr/bin/uv")
     both = cmd("--reader", "minicpm", "--judge")
     assert "--no-reader" not in both and "--no-judge" not in both
     assert "--no-judge" in cmd("--reader", "minicpm") and "--no-reader" not in cmd("--reader", "minicpm")
@@ -339,7 +337,7 @@ def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monke
     monkeypatch.setenv("PDF_OCR_WORKER_ENV", str(tmp_path / "missing"))
     monkeypatch.setattr(pdf_ocr.shutil, "which", lambda name: None)
     with pytest.raises(SystemExit) as no_uv:
-        pdf_ocr.start_worker(args("--reader", "minicpm"))
+        pdf_ocr.start_worker(spec("--reader", "minicpm"), tmp_path)
     messages = [pdf_ocr.worker_env_problem(), str(no_uv.value.code), *hook_unsupported_messages(),
                 *(pdf_ocr.memory_hint(args(*a), OOM_PAGE, {}) for a in
                   ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]

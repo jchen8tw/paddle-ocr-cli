@@ -70,7 +70,7 @@ def test_the_setup_checks_follow_the_planning_and_nothing_is_written_when_they_f
 
 class Loaded:
     """Replaces the setup checks and the model load of a Run: counts them and hands out an Engine built from the Run's own
-    options. `client` is the worker of the Runs that start one (--reader minicpm or --judge)."""
+    Engine spec. `client` is the worker of the Runs that start one (--reader minicpm or --judge)."""
 
     def __init__(self, monkeypatch, tmp_path, *, real_setup_checks=False):
         self.tmp_path, self.client = tmp_path / "engine", FakeClient(default_score=0.5)
@@ -82,9 +82,9 @@ class Loaded:
     def check_setup(self, spec, models_dir):
         self.checks += 1
 
-    def load_engine(self, args, stack):
+    def load_engine(self, spec, args, stack):
         self.loads += 1
-        engine, _ = engine_for(args, self.tmp_path, worker=self.client)
+        engine, _ = engine_for(spec, self.tmp_path, worker=self.client)
         engine.load_started = time.time() - 10_000  # the model load, long ago: a Document must not count it
         return engine
 

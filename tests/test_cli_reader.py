@@ -38,7 +38,7 @@ def test_a_run_with_no_options_needs_only_the_layout_and_paddleocr_vl_folders(tm
 
 
 def test_worker_command_runs_serve_py_in_the_worker_project_without_syncing(tmp_path):
-    cmd = pdf_ocr.worker_command(args("--reader", "minicpm", "--judge", "--models-dir", str(tmp_path)), uv="/usr/bin/uv")
+    cmd = pdf_ocr.worker_command(spec("--reader", "minicpm", "--judge"), tmp_path, uv="/usr/bin/uv")
     assert cmd[:2] == ["/usr/bin/uv", "run"]
     assert "--no-sync" in cmd and cmd[cmd.index("--project") + 1] == str(pdf_ocr.WORKER_DIR)
     assert cmd[-4:] == ["python", str(pdf_ocr.WORKER_DIR / "serve.py"), "--models-dir", str(tmp_path)]

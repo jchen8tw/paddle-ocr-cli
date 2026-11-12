@@ -1,6 +1,5 @@
 """Test doubles shared by the bridge and the Run tests: the worker, the PaddleX pipe and PaddleOCR-VL's own model, and
 `engine_for`, which builds an Engine from an option list out of them, and `SETUPS`, the four Reader x Judge setups."""
-import argparse
 import collections
 import sys
 from dataclasses import dataclass
@@ -215,38 +214,37 @@ class Fakes:
 
 
 def engine_for(options, tmp_path, *, worker=None):
-    """A loaded Engine (what `load_engine` returns) for an option list (or the parsed options of a Run), built the way
-    a Run builds it: `load_engine` and `attach_worker` in pdf_ocr.py, with the PaddleX pipe and the worker faked.
+    """A loaded Engine (what `load_engine` returns) for an option list (or the Engine spec of a Run), built the way a
+    Run builds it: `load_engine` and `attach_worker` in pdf_ocr.py, with the PaddleX pipe and the worker faked.
     Returns the Engine and the `Fakes` that steer it. `worker` is the FakeClient to use, if the test made its own.
 
-    It mirrors `attach_worker` and `load_engine` by hand, on purpose (the real functions need a worker), so a change
-    to the Reader x Judge wiring there must be mirrored here until the Engine spec (#31) replaces this function.
     It differs from a Run in three places: the bridge has no `after_read` (nothing to free in paddle's GPU cache),
     `to_html` converts nothing, and the Engine has the device "cpu" and no `load_started`."""
-    args = options if isinstance(options, argparse.Namespace) else pdf_ocr.parse_args(["in.pdf", *options])
+    spec = (options if isinstance(options, pdf_ocr.EngineSpec)
+            else pdf_ocr.EngineSpec.from_options(pdf_ocr.parse_args(["in.pdf", *options])))
     ink = pdf_ocr.InkReread()
-    if not pdf_ocr.needs_worker(args):  # PaddleOCR-VL alone: no worker, no bridge, no Reader hook
+    if spec.adapter is pdf_ocr.Adapter.PADDLEOCR_VL_ALONE:
         pipe = FakeVLPipe()
-        return pdf_ocr.Engine(pipe, "cpu", None, ink, None), Fakes(pipe, None, None)
+        return pdf_ocr.Engine(spec, pipe, "cpu", None, ink, None), Fakes(pipe, None, None)
     client = worker or FakeClient(default_score=0.5)  # every Reading scores below a high threshold: all re-read Rounds run
     crops = tmp_path / "crops"
     crops.mkdir(parents=True, exist_ok=True)
-    repair = StickyScriptRepair(ScriptRepair()) if args.judge and args.script == "auto" else None
-    common = dict(to_html=lambda s: "", judge=args.judge, repair=repair,
-                  **({"judge_threshold": args.judge_threshold} if args.judge else {}))
+    repair = StickyScriptRepair(ScriptRepair()) if spec.judge and spec.script == "auto" else None
+    common = dict(to_html=lambda s: "", judge=spec.judge, repair=repair,
+                  **({"judge_threshold": spec.judge_threshold} if spec.judge else {}))
     paddle = None
-    if args.reader == "paddle":
+    if spec.reader == "paddle":
         paddle = FakePaddle({"OCR:": "text for OCR:"})
         paddle.events = client.events
-        bridge = PaddleBridge(paddle, client, crops, before_read=client.park if args.judge else None, **common)
+        bridge = PaddleBridge(paddle, client, crops, before_read=client.park if spec.judge else None, **common)
     else:
         bridge = MiniCPMBridge(client, crops, **common)
-        if not args.judge and not args.no_recover:
-            bridge.ink_reread = ink.reread_with(bridge, args)
-    ready = {"event": "ready", "reader": pdf_ocr.MINICPM_MODEL_DIR if args.reader == "minicpm" else None,
-             "judge": pdf_ocr.JUDGE_MODEL_DIR if args.judge else None, "versions": {"torch": "0.0"}}
+        if spec.ink_reread:
+            bridge.ink_reread = ink.reread_with(bridge, spec)
+    ready = {"event": "ready", "reader": pdf_ocr.MINICPM_MODEL_DIR if spec.reader == "minicpm" else None,
+             "judge": pdf_ocr.JUDGE_MODEL_DIR if spec.judge else None, "versions": {"torch": "0.0"}}
     pipe = FakePipe(bridge)
-    return pdf_ocr.Engine(pipe, "cpu", bridge, ink, ready), Fakes(pipe, client, paddle)
+    return pdf_ocr.Engine(spec, pipe, "cpu", bridge, ink, ready), Fakes(pipe, client, paddle)
 
 
 def empty_models_dir(tmp_path):

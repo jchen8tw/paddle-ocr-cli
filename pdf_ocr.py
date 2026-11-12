@@ -339,11 +339,6 @@ def worker_env_path() -> Path:
     return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
 
 
-def needs_worker(args) -> bool:
-    """The torch worker holds MiniCPM (--reader minicpm) and Jev (--judge)."""
-    return args.reader == "minicpm" or args.judge
-
-
 def worker_env_problem() -> str | None:
     """None if the worker's virtual environment exists. Checked first because `uv run --no-sync` would
     otherwise silently create an empty one and fail later with a confusing import error."""
@@ -365,15 +360,13 @@ def worker_environment() -> dict:
     return env
 
 
-def worker_command(args, uv: str) -> list[str]:
-    """Only what the options use is loaded: MiniCPM only with --reader minicpm, Jev only with --judge. The worker's
-    own --no-reader and --no-judge flags are its private protocol, not the CLI's."""
+def worker_command(spec: EngineSpec, models_dir: Path, uv: str) -> list[str]:
+    """The worker's flags (EngineSpec.worker_flags) are its private protocol, not the CLI's."""
     return [uv, "run", "--project", str(WORKER_DIR), "--no-sync",
-            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve()),
-            *(["--no-reader"] if args.reader != "minicpm" else []), *([] if args.judge else ["--no-judge"])]
+            "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(models_dir.resolve()), *spec.worker_flags]
 
 
-def start_worker(args):
+def start_worker(spec: EngineSpec, models_dir: Path):
     """Start the torch worker and wait until its models are loaded. Returns (client, ready event)."""
     from worker_client import WorkerClient, WorkerError
 
@@ -383,7 +376,7 @@ def start_worker(args):
                  f"(install uv; {WORKER_FREE})")
     if problem := worker_env_problem():
         sys.exit(f"error: {problem}")
-    client = WorkerClient(worker_command(args, uv), env=worker_environment())
+    client = WorkerClient(worker_command(spec, models_dir, uv), env=worker_environment())
     try:
         return client, client.start()
     except WorkerError as e:
@@ -418,7 +411,7 @@ def engine_info(args, device: str, ready: dict | None) -> dict:
     return engine
 
 
-def build_pipeline(args, device: str):
+def build_pipeline(spec: EngineSpec, args, device: str):
     from paddleocr import PaddleOCRVL
 
     if not args.verbose:  # must run after the import: PaddleX configures its logger on import
@@ -426,7 +419,7 @@ def build_pipeline(args, device: str):
 
         pdx_logging.setup_logging("WARNING")
 
-    if args.reader == "paddle":
+    if spec.reader == "paddle":
         reader_args = {"vl_rec_model_dir": str(args.models_dir / VL_MODEL_DIR)}
     else:
         # The Reader is replaced by the worker (reader_bridge). Naming a server backend with a URL that is
@@ -437,12 +430,12 @@ def build_pipeline(args, device: str):
         layout_detection_model_dir=str(args.models_dir / LAYOUT_MODEL_DIR),
         **reader_args,
         device=device,
-        layout_threshold=args.layout_threshold,
+        layout_threshold=spec.layout_threshold,
         use_layout_detection=True,
-        use_chart_recognition=args.charts,
-        use_seal_recognition=args.seals,
-        use_ocr_for_image_block=args.ocr_images,
-        merge_layout_blocks=not args.no_merge_blocks,
+        use_chart_recognition=spec.charts,
+        use_seal_recognition=spec.seals,
+        use_ocr_for_image_block=spec.ocr_images,
+        merge_layout_blocks=spec.merge_blocks,
         markdown_ignore_labels=list(args.md_ignore_labels),
         format_block_content=False,  # keep the raw recognised text in the JSON
         # The orientation/unwarping models are not part of ./models, so they stay off.
@@ -462,7 +455,7 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(args, pipe, stack, ink):
+def attach_worker(spec: EngineSpec, models_dir: Path, pipe, stack, ink):
     """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
@@ -475,27 +468,27 @@ def attach_worker(args, pipe, stack, ink):
         sys.exit(f"error: {e} The hook is used by --reader minicpm and --judge; {WORKER_FREE}.")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
-    judge = args.judge
-    repair = StickyScriptRepair(ScriptRepair()) if judge and args.script == "auto" else None
-    paddle_model = reader_bridge.original_vl_model(pipe) if args.reader == "paddle" else None
+    judge = spec.judge
+    repair = StickyScriptRepair(ScriptRepair()) if judge and spec.script == "auto" else None
+    paddle_model = reader_bridge.original_vl_model(pipe) if spec.reader == "paddle" else None
     if paddle_model is not None:
         free_paddle_cache()  # the pipeline's construction left several GB cached; the Judge needs the room
     t0 = time.time()
     print("starting the torch worker ...", file=sys.stderr)
-    client, ready = start_worker(args)
+    client, ready = start_worker(spec, models_dir)
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
     common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair,
-                  **({"judge_threshold": args.judge_threshold} if judge else {}))
+                  **({"judge_threshold": spec.judge_threshold} if judge else {}))
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
             paddle_model, client, tmp_dir, before_read=client.park if judge else None,
             after_read=free_paddle_cache, **common)
     else:
         bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, **common)
-        if not judge and not args.no_recover:
-            bridge.ink_reread = ink.reread_with(bridge, args)
+        if spec.ink_reread:
+            bridge.ink_reread = ink.reread_with(bridge, spec)
     reader_bridge.install_reader_hook(pipe, bridge)
     return bridge, ready
 
@@ -662,7 +655,7 @@ class InkReread:
     def reset(self) -> None:
         self.renders = None
 
-    def reread_with(self, bridge, args):
+    def reread_with(self, bridge, spec: EngineSpec):
         def ink_reread(request, text):
             if self.renders is None or request.label not in TEXT_LABELS or request.bbox is None:
                 return None
@@ -672,7 +665,7 @@ class InkReread:
                 return None
 
             def reread_at_scale(factor):
-                return bridge.read_crop(renders.region(bbox, factor), "text", args.max_new_tokens).strip()
+                return bridge.read_crop(renders.region(bbox, factor), "text", spec.max_new_tokens).strip()
 
             return ink_reread_block(crop, text, reread_at_scale)
 
@@ -1177,12 +1170,14 @@ def check_setup(spec: EngineSpec, models_dir: Path) -> None:
 
 
 class Engine:
-    """What a Run loads once and every Document of it shares: the Layout model and the Reader (`pipe`, with the
-    Reader hook installed), the `device`, and, when the options need the worker, its `ready` event and the `bridge`.
-    `load_started` is when the loading began. The worker is released when the Run's ExitStack closes."""
+    """What a Run loads once and every Document of it shares: the `spec` it was loaded from, the Layout model and the
+    Reader (`pipe`, with the Reader hook installed), the `device`, and, when the spec needs the worker, its `ready`
+    event and the `bridge`. `load_started` is when the loading began. The worker is released when the Run's ExitStack
+    closes."""
 
-    def __init__(self, pipe, device: str, bridge, ink: InkReread, ready: dict | None, load_started: float | None = None):
-        self.pipe, self.device, self.bridge, self.ink, self.ready = pipe, device, bridge, ink, ready
+    def __init__(self, spec: EngineSpec, pipe, device: str, bridge, ink: InkReread, ready: dict | None,
+                 load_started: float | None = None):
+        self.spec, self.pipe, self.device, self.bridge, self.ink, self.ready = spec, pipe, device, bridge, ink, ready
         self.load_started = load_started
 
     def begin_document(self, doc_hash: str) -> None:
@@ -1193,19 +1188,19 @@ class Engine:
         self.ink.reset()
 
 
-def load_engine(args, stack) -> Engine:
+def load_engine(spec: EngineSpec, args, stack) -> Engine:
     """Load the models once per Run (after check_setup): the Layout model, the worker, and the bridge with the
     Reader hook installed. The worker and the crop folder are released when `stack` closes."""
     device = pick_device(args.device)
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
-    pipe = build_pipeline(args, device)
+    pipe = build_pipeline(spec, args, device)
     bridge = ready = None
     ink = InkReread()
-    if needs_worker(args):
-        bridge, ready = attach_worker(args, pipe, stack, ink)
+    if spec.needs_worker:
+        bridge, ready = attach_worker(spec, args.models_dir, pipe, stack, ink)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
-    return Engine(pipe, device, bridge, ink, ready, t_start)
+    return Engine(spec, pipe, device, bridge, ink, ready, t_start)
 
 
 def transcribe_document(engine: Engine, args, document: Document, out_dir: Path, started: float | None = None) -> dict:
@@ -1317,7 +1312,7 @@ def transcribe(spec: EngineSpec, args) -> int:
         sys.exit(f"error: {e}")
     with contextlib.ExitStack() as stack:  # releases the worker and its crop folder when the Run ends, however it ends
         stack.callback(document.close)
-        engine = load_engine(args, stack)
+        engine = load_engine(spec, args, stack)
         errors = transcribe_document(engine, args, document, args.output_dir or Path("output") / args.pdf.stem,
                                      started=engine.load_started)
     return 1 if errors else 0
@@ -1350,7 +1345,7 @@ def transcribe_folder(spec: EngineSpec, args) -> int:
     with contextlib.ExitStack() as stack:
         if todo:
             check_setup(spec, args.models_dir)
-            engine = load_engine(args, stack)
+            engine = load_engine(spec, args, stack)
         for label, planned in todo:
             document = None
             try:
