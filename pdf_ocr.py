@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import enum
 import importlib.metadata
 import os
 import re
@@ -180,6 +181,90 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
             raise ValueError(f"page range {part!r} outside 1..{total}")
         out.update(range(lo - 1, hi))
     return sorted(out)
+
+
+# --------------------------------------------------------------------------- Engine spec
+
+class Adapter(enum.Enum):
+    """How the Engine reads a page: with PaddleOCR-VL alone, or with the worker, which holds MiniCPM-OCR, the Judge,
+    or both."""
+    PADDLEOCR_VL_ALONE = "PaddleOCR-VL alone"
+    WORKER = "with the worker"
+
+
+# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
+MEMORY_WAYS_OUT = {
+    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
+                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
+                       "environment)",
+    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
+    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
+                       "--judge",
+    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
+                      "tightest combination; close other GPU programs, run without --judge, or use "
+                      "--reader minicpm --judge",
+}
+
+
+@dataclass(frozen=True)
+class EngineSpec:
+    """What the Engine loads and how it reads, settled once per Run from the options. Every rule that depends on the
+    Reader and the Judge is answered here."""
+    reader: str
+    judge: bool
+    judge_threshold: float | None
+    dpi: float
+    max_new_tokens: int
+    layout_threshold: float
+    charts: bool
+    seals: bool
+    ocr_images: bool
+    merge_blocks: bool
+    recover: bool
+    script: str
+
+    @classmethod
+    def from_options(cls, options) -> EngineSpec:
+        return cls(reader=options.reader, judge=options.judge, judge_threshold=options.judge_threshold,
+                   dpi=options.dpi, max_new_tokens=options.max_new_tokens, layout_threshold=options.layout_threshold,
+                   charts=options.charts, seals=options.seals, ocr_images=options.ocr_images,
+                   merge_blocks=not options.no_merge_blocks, recover=not options.no_recover, script=options.script)
+
+    @property
+    def adapter(self) -> Adapter:
+        return Adapter.WORKER if self.reader == "minicpm" or self.judge else Adapter.PADDLEOCR_VL_ALONE
+
+    @property
+    def needs_worker(self) -> bool:
+        return self.adapter is Adapter.WORKER
+
+    @property
+    def models(self) -> dict[str, str]:
+        """The model names of the JSON `engine` section and of the Already-done check: the Layout model, the Reader,
+        and the Judge when it is on. Each is also the folder of --models-dir that holds it, and the name the worker
+        (worker/serve.py) gives it."""
+        return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[self.reader],
+                **({"judge": JUDGE_MODEL_DIR} if self.judge else {})}
+
+    @property
+    def model_dirs(self) -> list[str]:
+        return list(self.models.values())
+
+    @property
+    def worker_flags(self) -> list[str]:
+        return [*(["--no-reader"] if self.reader != "minicpm" else []), *([] if self.judge else ["--no-judge"])]
+
+    @property
+    def ink_reread(self) -> bool:
+        return self.recover and not self.judge
+
+    @property
+    def memory_advice(self) -> str:
+        return MEMORY_WAYS_OUT[self.reader, self.judge]
+
+    def supports(self, step) -> bool:
+        """Whether the Reader can do this re-read Round, known without a bridge."""
+        return reader_bridge.reader_supports(self.reader)(step)
 
 
 # --------------------------------------------------------------------------- script repair
@@ -756,20 +841,6 @@ def judge_summary(outcomes: dict) -> dict:
             "readings_beyond_the_first": sum(sum(1 + r.duplicates for r in o.readings) - 1 for o in reread),
             "verdicts": dict(sorted(verdicts.items())),
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
-
-
-# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
-MEMORY_WAYS_OUT = {
-    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
-                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
-                       "environment)",
-    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
-    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
-                       "--judge",
-    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
-                      "tightest combination; close other GPU programs, run without --judge, or use "
-                      "--reader minicpm --judge",
-}
 
 
 def memory_hint(args, errors: dict, outcomes: dict) -> str | None:
