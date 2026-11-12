@@ -150,25 +150,40 @@ def test_a_block_the_pipeline_changed_after_the_reader_read_it_keeps_the_pipelin
     assert SIMPLIFIED not in markdown
 
 
-def move_both_blocks(blocks):
-    chart, text = blocks
-    chart.bbox, text.bbox = (0.4, 0.6, 16.2, 10.9), (20.4, 20.6, 36.2, 30.9)
+def page_by_page(pipe, *pages):
+    """The n-th page the pipe reads has the Blocks of `pages[n]`, each (label, the box it is read at, the box the
+    pipeline moves it to after reading)."""
+    read, pages = pipe.predict, iter(pages)
+
+    def predict(*args, **kwargs):
+        blocks = next(pages)
+        pipe.blocks = [(label, box) for label, box, _ in blocks]
+        results = read(*args, **kwargs)
+        for b, (_, _, moved_to) in zip(results[0]["parsing_res_list"], blocks):
+            b.bbox = moved_to
+        return results
+
+    pipe.predict = predict
 
 
 @every_setup
 def test_a_judged_block_whose_box_the_pipeline_moved_after_reading_has_no_score_and_only_the_judge_warns(
         tmp_path, capsys, setup):
     engine, fakes = engine_for(setup.options, tmp_path / "engine")
-    fakes.pipe.blocks = [("chart", (0, 0, 16, 8)), ("text", (20, 20, 36, 28))]
-    after_reading(fakes.pipe, move_both_blocks)
+    page_by_page(fakes.pipe,
+                 [("text", (20, 20, 36, 30), (20, 20, 36, 30))],  # page 2's text is moved onto the box of this Score
+                 [("chart", (0, 0, 16, 8), (0.4, 0.6, 16.2, 10.9)),
+                  ("text", (20, 20, 36, 28), (20.4, 20.6, 36.2, 30.9))])
     capsys.readouterr()
-    doc, _ = transcribe(engine, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", setup.options)
-    assert not any("score" in b for b in doc["pages"][0]["blocks"])
+    doc, _ = transcribe(engine, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", setup.options)
+    first, second = doc["pages"]
+    assert not any("score" in b for b in second["blocks"])
     err = capsys.readouterr().err.splitlines()
     warnings = [ln for ln in err if ln.startswith("warning:")]
     if not setup.judge:
         assert warnings == []
         return
+    assert "score" in first["blocks"][0]
     (warning,) = warnings  # a chart is never judged, so it has no Score to miss
-    assert warning.startswith("warning: page 1: the text Block at (20, 20, 36, 30) has no Score")
-    assert err.index(warning) < next(i for i, ln in enumerate(err) if ln.startswith("[  1/1] page 1:"))
+    assert warning.startswith("warning: page 2: the text Block at (20, 20, 36, 30) has no Score")
+    assert err.index(warning) < next(i for i, ln in enumerate(err) if ln.startswith("[  2/2] page 2:"))
