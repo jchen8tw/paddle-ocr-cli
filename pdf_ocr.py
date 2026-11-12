@@ -508,9 +508,11 @@ def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
     return best_text if best_text is not None and best_n > 1.5 * n else None
 
 
-def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]:
+def recover_short_blocks(pipe, page, res, img, scale: float, args, page_no: int) -> list[dict]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
-    differently scaled renders and keep the result only if it is clearly longer and plausible.
+    differently scaled renders and keep the result only if it is clearly longer and plausible. When the re-read of a
+    Block fails (the GPU ran out of memory, say) the Block keeps its first Reading and the page goes on, as in the
+    bridge (`page_no` is the page's number from 1, for the warning).
     (PaddleOCR-VL without --judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
     renders = PageRenders(page, img, scale, args.dpi)
@@ -528,7 +530,12 @@ def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]
                                max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             return "\n".join(blk.content for blk in out["parsing_res_list"]).strip()
 
-        better = ink_reread_block(crop, b.content, reread_at_scale)
+        try:
+            better = ink_reread_block(crop, b.content, reread_at_scale)
+        except Exception as e:
+            print(f"warning: page {page_no}: the re-read of block {bbox} failed, "
+                  f"keeping its first reading: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
         if better is not None:
             notes.append({"bbox": list(bbox), "original": b.content})
             b.content = better
@@ -1233,7 +1240,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             recovered = []
             if not args.judge and not args.no_recover and args.reader == "paddle":
-                recovered = recover_short_blocks(pipe, page, res, img, scale, args)  # PaddleOCR-VL, as before
+                recovered = recover_short_blocks(pipe, page, res, img, scale, args, idx + 1)  # PaddleOCR-VL, as before
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
             if bridge is not None and args.judge:

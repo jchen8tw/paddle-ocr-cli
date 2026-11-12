@@ -120,15 +120,22 @@ class FakePipe:
 class FakeVLPipe:
     """PaddleOCRVL without a Reader hook, as the default setup runs it: finds the same Blocks on every page (`blocks`)
     and reads each as `reads`. Called the way the ink-based Re-read calls it (layout detection off, the "ocr" prompt),
-    it reads the region it is given as `rereads`."""
+    it reads the region it is given as `rereads`. `read_fails` ({the n-th read of a page, from 1: the exception it raises})
+    and `reread_fails` (the exception every Re-read raises) make it fail."""
 
     def __init__(self):
         self.blocks, self.reads, self.rereads = list(BLOCKS), "text for OCR:", ""
+        self.read_fails, self.reread_fails, self.pages_read = {}, None, 0
 
     def predict(self, img, *, max_new_tokens, use_queues, use_layout_detection=True, prompt_label=None):
         if not use_layout_detection:
             assert prompt_label == "ocr", "the Re-read asks for the plain text prompt"
+            if self.reread_fails is not None:
+                raise self.reread_fails
             return [FakeResult([FakeBlock("text", (0, 0, 0, 0), self.rereads)])]
+        self.pages_read += 1
+        if self.pages_read in self.read_fails:
+            raise self.read_fails[self.pages_read]
         blocks = [FakeBlock(label, bbox) for label, bbox in self.blocks]
         for b in blocks:
             b.content = self.reads

@@ -71,7 +71,7 @@ def paddle_run(monkeypatch, capped_to=None):
     res = {"parsing_res_list": [block]}
     pipe = FakePipe()
     args = types.SimpleNamespace(dpi=DPI, max_new_tokens=512)
-    notes = pdf_ocr.recover_short_blocks(pipe, object(), res, img, SCALE, args)
+    notes = pdf_ocr.recover_short_blocks(pipe, object(), res, img, SCALE, args, 1)
     return pipe, notes, calls
 
 
