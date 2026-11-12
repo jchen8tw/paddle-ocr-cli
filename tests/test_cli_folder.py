@@ -8,8 +8,8 @@ import time
 import pytest
 
 import pdf_ocr
-from fakes import (REPAIR_SKIPPED_BY_AN_OLD_RUN, FakeClient, FakeVLPipe, blank_pdf, empty_models_dir, engine_for,
-                   without_opencc)
+from fakes import (REPAIR_SKIPPED_BY_AN_OLD_RUN, SETUPS, FakeClient, FakeVLPipe, blank_pdf, empty_models_dir,
+                   engine_for, without_opencc)
 
 
 def run_refused(argv, capsys):
@@ -215,6 +215,17 @@ def test_a_folder_whose_documents_are_all_done_exits_0_without_the_setup_checks_
         "2 Documents: 0 written, 2 skipped, 0 failed"]
     assert snapshot(tmp_path / "out") == before
     assert (loaded.checks, loaded.loads) == (1, 1)  # only the first Run
+
+
+@pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
+def test_a_second_run_with_the_same_options_skips_every_document_in_any_setup(tmp_path, capsys, loaded, setup):
+    folder = folder_of(tmp_path, "a.pdf", "sub/b.pdf", pages=2)
+    argv = [str(folder), "-o", str(tmp_path / "out"), *setup.options]
+    assert pdf_ocr.main(argv) == 0
+    capsys.readouterr()
+    assert pdf_ocr.main(argv) == 0
+    assert capsys.readouterr().err.splitlines()[-1] == "2 Documents: 0 written, 2 skipped, 0 failed"
+    assert loaded.loads == 1
 
 
 def test_a_second_run_processes_only_what_is_new_and_numbers_it_by_its_place_in_the_whole_run(

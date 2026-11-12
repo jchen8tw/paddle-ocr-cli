@@ -33,6 +33,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import block_reader
+import document_record
 import reader_bridge
 from minicpm_reader import unwrap_symbols
 from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
@@ -312,15 +313,17 @@ def start_worker(args):
         sys.exit(f"error: {e}")
 
 
-ENGINE_MODEL_KEYS = ("layout_model", "reader", "judge")
-
-
 def engine_models(args) -> dict:
     """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
     from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
     (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
     return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
             **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
+
+
+def run_fingerprint(args) -> document_record.Fingerprint:
+    """The settings and the model names a Run with these options writes into each Document's JSON."""
+    return document_record.fingerprint(args, engine_models(args), reader_bridge.reader_supports(args.reader))
 
 
 def engine_info(args, device: str, ready: dict | None) -> dict:
@@ -1020,8 +1023,8 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
 @dataclass(frozen=True)
 class PlannedDocument:
     """One Document of a folder Run: the PDF as found under the folder (a symlink stays a symlink), its path relative
-    to the folder, and the folder its files go to. `done` says whether it is Already done (`why_not_done` has the
-    rules); if not, `reason` says why it has to be processed."""
+    to the folder, and the folder its files go to. `done` says whether it is Already done
+    (`document_record.why_not_done` has the rules); if not, `reason` says why it has to be processed."""
     path: Path
     relative: Path
     out_dir: Path
@@ -1063,7 +1066,7 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                 for out_dir, same in by_dir.items() if len(same) > 1]
     for d in documents:
         for folder in (d.out_dir, *d.out_dir.parents):
-            if folder.name in ("imgs", "csv"):
+            if folder.name in (document_record.IMGS, document_record.CSV):
                 problems += [f"{d.relative_posix} writes to {d.out_dir}, "
                              f"inside the {folder.name}/ of {outer.relative_posix}"
                              for outer in by_dir.get(folder.parent, [])]
@@ -1077,57 +1080,12 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
-def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str | None:
-    """None when the JSON an earlier Run left for `document` reads cleanly and shows it is Already done: the PDF is the
-    same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, the script repair was not
-    skipped (`postprocessing.script_repair.skipped`), and the `settings` and the Engine's model names
-    (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it has to be processed. A JSON that is missing,
-    cut off or lacks a field is never an error. Library versions and the device are not compared, and a failed
-    cross-page restructuring (`postprocessing.restructuring_failed`) is not read: the Document stays done, and --force
-    redoes it."""
-    json_path = document.out_dir / f"{document.path.stem}.json"
-    try:
-        existing = json.loads(json_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return "no output yet"
-    except (OSError, ValueError) as e:
-        return f"its JSON cannot be read ({type(e).__name__})"
-    if not isinstance(existing, dict):
-        return "its JSON is not an object"
-    source, engine, written = existing.get("source"), existing.get("engine"), existing.get("settings")
-    postprocessing = existing.get("postprocessing")
-    repair = postprocessing.get("script_repair") if isinstance(postprocessing, dict) else None
-    if not (isinstance(source, dict) and isinstance(source.get("sha256"), str)
-            and isinstance(source.get("page_count"), int) and isinstance(source.get("pages_processed"), list)
-            and isinstance(source.get("pages_failed"), list) and isinstance(engine, dict) and isinstance(written, dict)
-            and isinstance(repair, dict)):
-        return ("its JSON lacks source.sha256, source.page_count, source.pages_processed, source.pages_failed, engine, "
-                "settings or postprocessing.script_repair")
-    if source["pages_processed"] != list(range(1, source["page_count"] + 1)):
-        return (f"only page(s) {', '.join(map(str, source['pages_processed']))} of {source['page_count']} were "
-                "transcribed")
-    if source["pages_failed"]:
-        return f"page(s) {', '.join(map(str, source['pages_failed']))} failed last time"
-    if "skipped" in repair:
-        return f"its script repair was skipped last time ({repair['skipped']})"
-    if written != settings:
-        keys = sorted(k for k in written.keys() | settings.keys() if written.get(k) != settings.get(k))
-        return f"settings differ: {', '.join(keys)}"
-    if differing := [k for k in ENGINE_MODEL_KEYS if engine.get(k) != models.get(k)]:
-        return f"models differ: {', '.join(differing)}"
-    try:
-        if file_sha256(document.path) != source["sha256"]:
-            return "the PDF changed"
-    except OSError as e:
-        return f"cannot read the PDF ({e.strerror})"
-    return None
-
-
 def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
     """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
-    with the folder it writes to and whether it is Already done (`why_not_done`; never with --force). `output_root` is
-    `-o`, or None for output/<name of the resolved folder>. Raises PlanError for a folder without Documents and for
-    colliding output folders, those of Documents that are done included."""
+    with the folder it writes to and whether it is Already done (`document_record.why_not_done`, under one
+    Fingerprint for the whole Run; never with --force). `output_root` is `-o`, or None for output/<name of the
+    resolved folder>. Raises PlanError for a folder without Documents and for colliding output folders, those of
+    Documents that are done included."""
     root = output_root if output_root is not None else Path("output") / folder.resolve().name
     documents = [PlannedDocument(folder / rel, rel, root / rel.parent / rel.stem) for rel in find_pdfs(folder)]
     if not documents:
@@ -1135,8 +1093,8 @@ def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocume
     refuse_collisions(documents)
     if args.force:
         return [replace(d, reason="--force") for d in documents]
-    settings, models = settings_info(args), engine_models(args)
-    reasons = [why_not_done(d, settings, models) for d in documents]
+    fingerprint = run_fingerprint(args)
+    reasons = [document_record.why_not_done(d.path, d.out_dir, fingerprint) for d in documents]
     return [replace(d, done=reason is None, reason=reason or "") for d, reason in zip(documents, reasons)]
 
 

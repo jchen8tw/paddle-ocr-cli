@@ -986,7 +986,8 @@ no worker, `--judge` gives threshold 0.5, `--judge-threshold` without `--judge` 
 message suggests turning the Judge off or choosing PaddleOCR-VL, which are already the defaults), the configurations in
 `tests/baseline.json` (`tests/test_baseline.py`: each one's options give the `settings` it records, and its bound
 follows the rule below), and folder runs: which Documents a folder holds and where each one writes
-(`tests/test_folder_plan.py`), which of them are already done (`tests/test_folder_done.py`), the `settings` and the
+(`tests/test_folder_plan.py`), which of them are already done (`tests/test_folder_done.py`; the JSON and the check
+itself, on JSONs written by its own writer and then damaged, in `tests/test_document_record.py`), the `settings` and the
 Engine's model names known from the options alone (`tests/test_options_only.py`), what is refused before any model
 loads, and the loop over the Documents with a faked model load, skipping, an output root inside the folder and a worker
 crash included (`tests/test_cli_folder.py`). Every one of those tests that runs a whole Document builds its Engine
