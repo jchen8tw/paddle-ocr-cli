@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import importlib.metadata
-import json
 import os
 import re
 import shutil
@@ -33,6 +31,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import block_reader
+import document_record
 import reader_bridge
 from minicpm_reader import unwrap_symbols
 from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
@@ -312,15 +311,16 @@ def start_worker(args):
         sys.exit(f"error: {e}")
 
 
-ENGINE_MODEL_KEYS = ("layout_model", "reader", "judge")
-
-
 def engine_models(args) -> dict:
     """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
     from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
     (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
     return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
             **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
+
+
+def run_fingerprint(args) -> document_record.Fingerprint:
+    return document_record.fingerprint(args, engine_models(args), reader_bridge.reader_supports(args.reader))
 
 
 def engine_info(args, device: str, ready: dict | None) -> dict:
@@ -794,38 +794,6 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
     return line
 
 
-def reread_schedule_info(supports) -> list[dict]:
-    """The re-read schedule for the JSON `settings`, with whether the Reader of this run can do each round."""
-    return [{"round": s.round, "decode": s.decode, "temperature": s.temperature, "scale": s.scale, "samples": s.samples,
-             "supported": bool(supports(s))} for s in block_reader.SCHEDULE]
-
-
-def settings_info(args, bridge=None) -> dict:
-    """The JSON `settings` section, known from the options alone: a re-read Round is `supported` when the Reader that
-    --reader names can do it (a live `bridge` answers with that same Reader's rule)."""
-    supports = reader_bridge.reader_supports(args.reader) if bridge is None else bridge.supports
-    return {
-        "reader": args.reader,
-        "judge": args.judge,
-        "judge_threshold": args.judge_threshold,
-        **({"reread_schedule": reread_schedule_info(supports),
-            "max_readings_per_block": block_reader.MAX_READINGS} if args.judge else {}),
-        "dpi": args.dpi,
-        "layout_threshold": args.layout_threshold,
-        "max_new_tokens": args.max_new_tokens,
-        "chart_recognition": args.charts,
-        "seal_recognition": args.seals,
-        "ocr_for_image_blocks": args.ocr_images,
-        "merge_layout_blocks": not args.no_merge_blocks,
-        "reread_short_blocks": not args.judge and not args.no_recover,  # the ink-based re-read; never with the Judge
-        "markdown_merge_tables": not args.no_merge_tables,
-        "markdown_ignore_labels": list(args.md_ignore_labels),
-        "script": args.script,
-        "page_markers": not args.no_page_markers,
-        "csv_export": not args.no_csv,
-    }
-
-
 def page_markdown(idx: int, res, out_dir: Path, markers: bool) -> str:
     md = res._to_markdown(pretty=False, show_formula_number=True)
     text = md["markdown_texts"]
@@ -833,8 +801,8 @@ def page_markdown(idx: int, res, out_dir: Path, markers: bool) -> str:
     for rel, image in (md.get("markdown_images") or {}).items():
         if image is None:
             continue
-        new_rel = f"imgs/p{idx + 1:03d}_{Path(rel).name}"
-        (out_dir / "imgs").mkdir(exist_ok=True)
+        new_rel = f"{document_record.IMGS}/p{idx + 1:03d}_{Path(rel).name}"
+        (out_dir / document_record.IMGS).mkdir(exist_ok=True)
         image.save(out_dir / new_rel)
         text = text.replace(rel, new_rel)
     return (f"<!-- page {idx + 1} -->\n\n" if markers else "") + text.strip()
@@ -1020,8 +988,8 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
 @dataclass(frozen=True)
 class PlannedDocument:
     """One Document of a folder Run: the PDF as found under the folder (a symlink stays a symlink), its path relative
-    to the folder, and the folder its files go to. `done` says whether it is Already done (`why_not_done` has the
-    rules); if not, `reason` says why it has to be processed."""
+    to the folder, and the folder its files go to. `done` says whether it is Already done
+    (`document_record.why_not_done` has the rules); if not, `reason` says why it has to be processed."""
     path: Path
     relative: Path
     out_dir: Path
@@ -1063,7 +1031,7 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                 for out_dir, same in by_dir.items() if len(same) > 1]
     for d in documents:
         for folder in (d.out_dir, *d.out_dir.parents):
-            if folder.name in ("imgs", "csv"):
+            if folder.name in (document_record.IMGS, document_record.CSV):
                 problems += [f"{d.relative_posix} writes to {d.out_dir}, "
                              f"inside the {folder.name}/ of {outer.relative_posix}"
                              for outer in by_dir.get(folder.parent, [])]
@@ -1072,62 +1040,12 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                         + "\n  ".join(problems))
 
 
-def file_sha256(path: Path) -> str:
-    with open(path, "rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
-
-
-def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str | None:
-    """None when the JSON an earlier Run left for `document` reads cleanly and shows it is Already done: the PDF is the
-    same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, the script repair was not
-    skipped (`postprocessing.script_repair.skipped`), and the `settings` and the Engine's model names
-    (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it has to be processed. A JSON that is missing,
-    cut off or lacks a field is never an error. Library versions and the device are not compared, and a failed
-    cross-page restructuring (`postprocessing.restructuring_failed`) is not read: the Document stays done, and --force
-    redoes it."""
-    json_path = document.out_dir / f"{document.path.stem}.json"
-    try:
-        existing = json.loads(json_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return "no output yet"
-    except (OSError, ValueError) as e:
-        return f"its JSON cannot be read ({type(e).__name__})"
-    if not isinstance(existing, dict):
-        return "its JSON is not an object"
-    source, engine, written = existing.get("source"), existing.get("engine"), existing.get("settings")
-    postprocessing = existing.get("postprocessing")
-    repair = postprocessing.get("script_repair") if isinstance(postprocessing, dict) else None
-    if not (isinstance(source, dict) and isinstance(source.get("sha256"), str)
-            and isinstance(source.get("page_count"), int) and isinstance(source.get("pages_processed"), list)
-            and isinstance(source.get("pages_failed"), list) and isinstance(engine, dict) and isinstance(written, dict)
-            and isinstance(repair, dict)):
-        return ("its JSON lacks source.sha256, source.page_count, source.pages_processed, source.pages_failed, engine, "
-                "settings or postprocessing.script_repair")
-    if source["pages_processed"] != list(range(1, source["page_count"] + 1)):
-        return (f"only page(s) {', '.join(map(str, source['pages_processed']))} of {source['page_count']} were "
-                "transcribed")
-    if source["pages_failed"]:
-        return f"page(s) {', '.join(map(str, source['pages_failed']))} failed last time"
-    if "skipped" in repair:
-        return f"its script repair was skipped last time ({repair['skipped']})"
-    if written != settings:
-        keys = sorted(k for k in written.keys() | settings.keys() if written.get(k) != settings.get(k))
-        return f"settings differ: {', '.join(keys)}"
-    if differing := [k for k in ENGINE_MODEL_KEYS if engine.get(k) != models.get(k)]:
-        return f"models differ: {', '.join(differing)}"
-    try:
-        if file_sha256(document.path) != source["sha256"]:
-            return "the PDF changed"
-    except OSError as e:
-        return f"cannot read the PDF ({e.strerror})"
-    return None
-
-
 def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
     """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
-    with the folder it writes to and whether it is Already done (`why_not_done`; never with --force). `output_root` is
-    `-o`, or None for output/<name of the resolved folder>. Raises PlanError for a folder without Documents and for
-    colliding output folders, those of Documents that are done included."""
+    with the folder it writes to and whether it is Already done (`document_record.why_not_done`, under one
+    Fingerprint for the whole Run; never with --force). `output_root` is `-o`, or None for output/<name of the
+    resolved folder>. Raises PlanError for a folder without Documents and for colliding output folders, those of
+    Documents that are done included."""
     root = output_root if output_root is not None else Path("output") / folder.resolve().name
     documents = [PlannedDocument(folder / rel, rel, root / rel.parent / rel.stem) for rel in find_pdfs(folder)]
     if not documents:
@@ -1135,8 +1053,8 @@ def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocume
     refuse_collisions(documents)
     if args.force:
         return [replace(d, reason="--force") for d in documents]
-    settings, models = settings_info(args), engine_models(args)
-    reasons = [why_not_done(d, settings, models) for d in documents]
+    fingerprint = run_fingerprint(args)
+    reasons = [document_record.why_not_done(d.path, d.out_dir, fingerprint) for d in documents]
     return [replace(d, done=reason is None, reason=reason or "") for d, reason in zip(documents, reasons)]
 
 
@@ -1231,7 +1149,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     t_start = time.time() if started is None else started
     pdf, indices, total = document.pdf, document.indices, document.total
     out_dir.mkdir(parents=True, exist_ok=True)
-    doc_hash = file_sha256(document.path)  # also seeds the sampling of the re-reads
+    doc_hash = document_record.sha256(document.path)
     engine.begin_document(doc_hash)
     pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
 
@@ -1294,38 +1212,25 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
               "Markdown is written per page without merged tables or re-levelled titles", file=sys.stderr)
         restructured = ok
     md_parts = {idx: page_markdown(idx, r, out_dir, not args.no_page_markers) for idx, r in restructured}
-    csv_info = None if args.no_csv else export_csv_tables(restructured, pages, out_dir / "csv")
+    csv_info = None if args.no_csv else export_csv_tables(restructured, pages, out_dir / document_record.CSV)
     for idx, msg in errors.items():
         pages[idx] = {"page": idx + 1, "error": msg, "blocks": []}
         md_parts[idx] = f"<!-- page {idx + 1} failed: {msg} -->"
 
-    stem = document.path.stem
-    md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
+    md_path = document_record.markdown_path(document.path, out_dir)
     md_path.write_text("\n\n".join(md_parts[i] for i in sorted(md_parts)) + "\n", encoding="utf-8")
-    record = {
-        "source": {
-            "file": document.path.name,
-            "sha256": doc_hash,
-            "page_count": total,
-            "pages_processed": [i + 1 for i in indices],
-            "pages_failed": [i + 1 for i in sorted(errors)],
-        },
-        "engine": engine_info(args, device, engine.ready),
-        "settings": settings_info(args, bridge),
-        "postprocessing": {
-            "tables_with_line_breaks_fixed": tables_fixed,
-            **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
-            "latex_symbols_unwrapped": unwrapped + (bridge.symbols_unwrapped if bridge else 0),
-            "script_repair": script_info,
-            **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
-               if bridge and args.judge else {}),
-            **({"restructuring_failed": restructuring_failed} if restructuring_failed else {}),
-        },
-        "csv_tables": csv_info,
-        "elapsed_seconds": round(time.time() - t_start, 1),
-        "pages": [pages[i] for i in sorted(pages)],
-    }
-    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tally = document_record.EngineTally()
+    if bridge is not None:
+        judge = ({**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}
+                 if args.judge else None)
+        tally = document_record.EngineTally(bridge.repetition_cuts, bridge.symbols_unwrapped, judge)
+    transcription = document_record.Transcription(
+        sha256=doc_hash, page_count=total, pages_processed=[i + 1 for i in indices],
+        pages_failed=[i + 1 for i in sorted(errors)], tables_with_line_breaks_fixed=tables_fixed,
+        latex_symbols_unwrapped=unwrapped, script_repair=script_info, restructuring_failed=restructuring_failed,
+        csv_tables=csv_info, elapsed_seconds=time.time() - t_start, pages=[pages[i] for i in sorted(pages)])
+    json_path = document_record.write(document.path, out_dir, run_fingerprint(args),
+                                      engine_info(args, device, engine.ready), tally, transcription)
     if hint := memory_hint(args, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""

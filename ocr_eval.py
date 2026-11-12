@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+import document_record
+
 # Blocks whose content is not comparable with the text layer, or not read unless asked for.
 UNREAD_LABELS = frozenset({"image", "chart", "seal", "header_image", "footer_image"})
 # Display formulas are read as LaTeX, while the text layer holds the typeset glyphs in drawing order, so the two
@@ -221,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="the run's JSON (default: output/<pdf stem>/<pdf stem>.json)")
     ap.add_argument("--report", type=Path, metavar="FILE", help="also write the scores as JSON")
     args = ap.parse_args(argv)
-    score = evaluate(args.pdf, args.json or Path("output") / args.pdf.stem / f"{args.pdf.stem}.json")
+    score = evaluate(args.pdf, args.json or document_record.json_path(args.pdf, Path("output") / args.pdf.stem))
     print(format_report(score))
     if args.report:
         args.report.write_text(json.dumps(to_dict(score), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

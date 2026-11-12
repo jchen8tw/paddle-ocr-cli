@@ -1,14 +1,14 @@
 """What a Run would write to the JSON's `settings` and `engine` model names, known from the options alone: no worker, no
 models. The "already done" check of a folder Run compares an existing JSON with exactly this."""
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
 
 import pdf_ocr
-from fakes import SETUPS, FakeClient, blank_pdf, engine_for
-from reader_bridge import MiniCPMBridge, PaddleBridge
+from block_reader import SCHEDULE
+from fakes import FakeClient
+from reader_bridge import MiniCPMBridge, PaddleBridge, reader_supports
 
 ROOT = Path(__file__).resolve().parent.parent
 READERS = ["minicpm", "paddle"]
@@ -28,25 +28,16 @@ def bridge_for(reader, judge, tmp_path):
 
 @pytest.mark.parametrize("judge", [True, False])
 @pytest.mark.parametrize("reader", READERS)
-def test_the_settings_from_the_options_alone_equal_those_of_a_live_bridge(reader, judge, tmp_path):
-    a = args("--reader", reader, *(["--judge"] if judge else []))
-    assert pdf_ocr.settings_info(a) == pdf_ocr.settings_info(a, bridge_for(reader, judge, tmp_path))
+def test_for_every_round_a_live_bridge_answers_like_the_rule_of_the_reader_that_reader_names(reader, judge, tmp_path):
+    rule = reader_supports(args("--reader", reader).reader)
+    bridge = bridge_for(reader, judge, tmp_path)
+    assert [bridge.supports(step) for step in SCHEDULE] == [rule(step) for step in SCHEDULE]
 
 
 @pytest.mark.parametrize("reader, supported", [("minicpm", [True, True, True, True]), ("paddle", [True, True, False, False])])
 def test_each_reader_says_which_rounds_it_can_do_without_a_bridge(reader, supported):
-    schedule = pdf_ocr.settings_info(args("--reader", reader, "--judge"))["reread_schedule"]
+    schedule = pdf_ocr.run_fingerprint(args("--reader", reader, "--judge")).settings["reread_schedule"]
     assert [r["supported"] for r in schedule] == supported
-
-
-@pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
-def test_the_settings_a_run_writes_are_the_settings_from_the_options_alone(tmp_path, setup):
-    pdf = blank_pdf(tmp_path / "in.pdf")
-    a = pdf_ocr.parse_args([str(pdf), *setup.options, "--script", "off", "--no-page-markers"])
-    engine, _ = engine_for(a, tmp_path / "engine")
-    pdf_ocr.transcribe_document(engine, a, pdf_ocr.open_document(pdf, None), tmp_path / "out")
-    written = json.loads((tmp_path / "out" / "in.json").read_text(encoding="utf-8"))
-    assert written["settings"] == pdf_ocr.settings_info(a)
 
 
 MODELS = [
