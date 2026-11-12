@@ -795,38 +795,6 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
     return line
 
 
-def reread_schedule_info(supports) -> list[dict]:
-    """The re-read schedule for the JSON `settings`, with whether the Reader of this run can do each round."""
-    return [{"round": s.round, "decode": s.decode, "temperature": s.temperature, "scale": s.scale, "samples": s.samples,
-             "supported": bool(supports(s))} for s in block_reader.SCHEDULE]
-
-
-def settings_info(args, bridge=None) -> dict:
-    """The JSON `settings` section, known from the options alone: a re-read Round is `supported` when the Reader that
-    --reader names can do it (a live `bridge` answers with that same Reader's rule)."""
-    supports = reader_bridge.reader_supports(args.reader) if bridge is None else bridge.supports
-    return {
-        "reader": args.reader,
-        "judge": args.judge,
-        "judge_threshold": args.judge_threshold,
-        **({"reread_schedule": reread_schedule_info(supports),
-            "max_readings_per_block": block_reader.MAX_READINGS} if args.judge else {}),
-        "dpi": args.dpi,
-        "layout_threshold": args.layout_threshold,
-        "max_new_tokens": args.max_new_tokens,
-        "chart_recognition": args.charts,
-        "seal_recognition": args.seals,
-        "ocr_for_image_blocks": args.ocr_images,
-        "merge_layout_blocks": not args.no_merge_blocks,
-        "reread_short_blocks": not args.judge and not args.no_recover,  # the ink-based re-read; never with the Judge
-        "markdown_merge_tables": not args.no_merge_tables,
-        "markdown_ignore_labels": list(args.md_ignore_labels),
-        "script": args.script,
-        "page_markers": not args.no_page_markers,
-        "csv_export": not args.no_csv,
-    }
-
-
 def page_markdown(idx: int, res, out_dir: Path, markers: bool) -> str:
     md = res._to_markdown(pretty=False, show_formula_number=True)
     text = md["markdown_texts"]

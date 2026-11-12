@@ -26,7 +26,7 @@ def test_both_readers_are_measured_with_the_judge_on():
 @pytest.mark.parametrize("name", CONFIGURATIONS)
 def test_a_measured_configuration_still_runs_with_the_settings_it_was_measured_with(name):
     entry = CONFIGURATIONS[name]
-    settings = pdf_ocr.settings_info(parse(entry["argv"]))
+    settings = pdf_ocr.run_fingerprint(parse(entry["argv"])).settings
     assert {k: settings[k] for k in entry["settings"]} == entry["settings"]
 
 

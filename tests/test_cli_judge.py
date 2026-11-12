@@ -78,15 +78,15 @@ def test_the_paddle_reader_with_the_judge_has_the_workers_versions_too():
 
 
 def test_the_settings_record_whether_the_judge_was_on_and_its_threshold():
-    s = pdf_ocr.settings_info(args("--reader", "minicpm", "--judge", "--judge-threshold", "0.9"))
+    s = pdf_ocr.run_fingerprint(args("--reader", "minicpm", "--judge", "--judge-threshold", "0.9")).settings
     assert s["judge"] is True and s["judge_threshold"] == 0.9 and s["reader"] == "minicpm"
-    s = pdf_ocr.settings_info(args("--no-judge"))
+    s = pdf_ocr.run_fingerprint(args("--no-judge")).settings
     assert s["judge"] is False and s["judge_threshold"] is None
     assert s["reread_short_blocks"] is True  # the ink-based re-read is what runs without the Judge
 
 
 def test_a_run_with_no_options_records_paddle_without_the_judge_and_with_the_ink_based_reread():
-    s = pdf_ocr.settings_info(args())
+    s = pdf_ocr.run_fingerprint(args()).settings
     assert (s["reader"], s["judge"], s["judge_threshold"], s["reread_short_blocks"]) == ("paddle", False, None, True)
     assert "reread_schedule" not in s
 
@@ -94,18 +94,18 @@ def test_a_run_with_no_options_records_paddle_without_the_judge_and_with_the_ink
 @pytest.mark.parametrize("argv, expected", [([], "auto"), (["--script", "auto"], "auto"), (["--script", "off"], "off")])
 @pytest.mark.parametrize("judge", [[], ["--judge"]])
 def test_the_settings_record_the_script_option_asked_for(argv, expected, judge):
-    assert pdf_ocr.settings_info(args(*argv, *judge))["script"] == expected
+    assert pdf_ocr.run_fingerprint(args(*argv, *judge)).settings["script"] == expected
 
 
 @pytest.mark.parametrize("argv, expected", [([], True), (["--no-page-markers"], False)])
 @pytest.mark.parametrize("judge", [[], ["--judge"]])
 def test_the_settings_record_whether_page_markers_were_asked_for(argv, expected, judge):
-    assert pdf_ocr.settings_info(args(*argv, *judge))["page_markers"] is expected
+    assert pdf_ocr.run_fingerprint(args(*argv, *judge)).settings["page_markers"] is expected
 
 
 def test_with_the_judge_on_the_ink_based_reread_is_not_run_and_the_settings_say_so():
-    assert pdf_ocr.settings_info(args("--judge"))["reread_short_blocks"] is False
-    assert pdf_ocr.settings_info(args("--no-recover"))["reread_short_blocks"] is False
+    assert pdf_ocr.run_fingerprint(args("--judge")).settings["reread_short_blocks"] is False
+    assert pdf_ocr.run_fingerprint(args("--no-recover")).settings["reread_short_blocks"] is False
 
 
 # --- the JSON of a judged Block -------------------------------------------------------------------------
@@ -265,16 +265,14 @@ def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rou
 
 
 def test_the_settings_record_the_schedule_and_which_rounds_the_reader_can_do():
-    s = pdf_ocr.settings_info(args("--judge"))
+    s = pdf_ocr.run_fingerprint(args("--judge")).settings
     assert [(r["round"], r["scale"], r["temperature"]) for r in s["reread_schedule"]] == [
         (1, 1.0, None), (2, 1.25, None), (3, 1.0, 0.3), (4, 1.0, 0.7)]
     assert [r["supported"] for r in s["reread_schedule"]] == [True, True, False, False]
     assert s["max_readings_per_block"] == 10
-    minicpm = pdf_ocr.settings_info(args("--reader", "minicpm", "--judge"))["reread_schedule"]
+    minicpm = pdf_ocr.run_fingerprint(args("--reader", "minicpm", "--judge")).settings["reread_schedule"]
     assert [r["supported"] for r in minicpm] == [True] * 4
-    bridge = types.SimpleNamespace(supports=lambda step: step.round == 1)  # a live bridge answers for its Reader
-    assert [r["supported"] for r in pdf_ocr.settings_info(args("--judge"), bridge)["reread_schedule"]] == [True, False, False, False]
-    assert "reread_schedule" not in pdf_ocr.settings_info(args())
+    assert "reread_schedule" not in pdf_ocr.run_fingerprint(args()).settings
 
 
 # --- a run that ran out of GPU memory says what to do ---------------------------------------------------
