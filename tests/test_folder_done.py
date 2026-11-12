@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import pdf_ocr
-from fakes import blank_pdf, engine_for
+from fakes import SETUPS, blank_pdf, engine_for
 
 JUDGE_ON = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # the Run these tests start from
 JUDGE_OFF = ["--reader", "minicpm", "--no-judge"]  # the same Reader without the Judge: a threshold would be a usage error
@@ -57,11 +57,10 @@ def test_documents_whose_json_matches_the_pdf_and_the_options_are_done(tmp_path)
     assert [(d.done, d.reason) for d in plan_.values()] == [(True, ""), (True, "")]
 
 
-@pytest.mark.parametrize("base", [[], ["--judge"], ["--reader", "minicpm"], JUDGE_ON],
-                         ids=["paddleocr-vl", "paddleocr-vl+judge", "minicpm", "minicpm+judge"])
-def test_documents_written_in_any_setup_are_done_for_a_run_with_the_same_options(tmp_path, base):
-    folder, out = written(tmp_path, base=base)
-    plan_ = plan(folder, out, base=base)
+@pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
+def test_documents_written_in_any_setup_are_done_for_a_run_with_the_same_options(tmp_path, setup):
+    folder, out = written(tmp_path, base=setup.options)
+    plan_ = plan(folder, out, base=setup.options)
     assert [(d.done, d.reason) for d in plan_.values()] == [(True, ""), (True, "")]
 
 

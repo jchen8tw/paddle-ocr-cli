@@ -234,7 +234,7 @@ weights placed under the same model folder names. A single PDF is always transcr
 | `--no-merge-blocks` | | do not merge adjacent text blocks before OCR |
 | `--judge`, `--no-judge` | off | `--judge` scores every text, formula and table block with the Judge and re-reads the low-Score ones (see "The Judge"). It needs the worker environment, Chromium, `node` and Noto Sans CJK. Without it the JSON has no Scores, and the ink-based re-read of short blocks runs instead. `--no-judge` is accepted and means off; if both are given, the last one wins |
 | `--judge-threshold FLOAT` | 0.5 with `--judge` | only with `--judge`: without it the tool stops with a usage error that says to add `--judge`. A number from 0 to 1 (anything else is rejected); blocks whose first Reading scores below this are re-read (up to 10 Readings, stopping after a round that reads no new text; see "Re-reading low-Score Blocks") and marked `flagged` in the JSON and counted per page on stderr. A re-read never clears the flag, and a block whose first Reading could not be scored is flagged too. The Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain; 0.5 is calibrated on one document (see "Tuning notes"). `0` keeps the Scores and re-reads nothing |
-| `--no-recover` | | without `--judge`, turn off the ink-based re-read of implausibly short blocks (the truncated-block re-read). With `--judge` that re-read never runs, and `--no-recover` changes nothing |
+| `--no-recover` | | without `--judge`, turn off the ink-based re-read of implausibly short blocks (the truncated-block re-read; one that fails keeps the block's first Reading and only warns on stderr). With `--judge` that re-read never runs, and `--no-recover` changes nothing |
 | `--script {auto,off}` | `auto` | Simplified to Traditional repair, which also writes `≥`/`≤` as `≧`/`≦`; `off` keeps the raw model output |
 | `--md-ignore-labels` | header, footer, page number, aside | block labels left out of the Markdown (the JSON keeps everything) |
 | `--no-merge-tables` | | keep a table that continues over a page break as separate per-page tables in the Markdown and CSV |
@@ -629,7 +629,11 @@ Each change and the reason for it:
    PaddleOCR-VL returns a few characters for a whole paragraph, and it does so every time for the same input. The
    tool estimates from the ink how many glyphs a text block holds. If the recognised text has fewer than 35 % of
    that, the block is re-read from renders at 1.25× and 0.8×. The longer reading is kept only if it is clearly
-   longer and still plausible. On the sample, this recovered a 77-character paragraph exactly.
+   longer and still plausible. On the sample, this recovered a 77-character paragraph exactly. If the re-read
+   itself fails, for example because the GPU runs out of memory, the Block keeps its first Reading and the page
+   goes on. Each such Block puts one line on stderr, `warning: page N: the re-read of block (x1, y1, x2, y2) failed,
+   keeping its first reading: <ExcType>: <msg>`. The page is not marked failed and gets no end-of-run hint about GPU
+   memory of its own. This is the same with `--reader paddle` and `--reader minicpm`.
 5. **Table line breaks.** PaddleOCR-VL writes an in-cell line break as a literal `\n`. It is rewritten to
    `<br>` (MiniCPM: see below).
 6. **Charts and seals are opt-in** (both). In a synthetic test, PaddleOCR-VL's chart recognition invented data for a

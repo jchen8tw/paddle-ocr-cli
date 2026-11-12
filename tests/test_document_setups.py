@@ -5,23 +5,17 @@ worker are fakes; the pages, the post-processing and the files are the real ones
 the JSON, the Markdown and stderr.
 """
 import json
-import re
 from dataclasses import dataclass
 
 import pytest
 
 import pdf_ocr
-from fakes import INK_BOX, FakeClient, blank_pdf, engine_for, inked_pdf
+from fakes import INK_BOX, SETUPS, FakeClient, blank_pdf, engine_for, inked_pdf
 from worker_client import WorkerError
 
-# (options, Reader folder in the JSON, Judge folder in the JSON or None, whether the setup starts the worker)
-SETUPS = [
-    pytest.param([], "PaddleOCR-VL-1.6", None, False, id="paddleocr-vl"),
-    pytest.param(["--judge"], "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev", True, id="paddleocr-vl+judge"),
-    pytest.param(["--reader", "minicpm"], "MiniCPM-OCR-1.0", None, True, id="minicpm"),
-    pytest.param(["--reader", "minicpm", "--judge"], "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev", True, id="minicpm+judge"),
-]
-JUDGED = [s for s in SETUPS if s.values[2]]
+every_setup = pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
+judged_setups = pytest.mark.parametrize("setup", [s for s in SETUPS if s.judge], ids=lambda setup: setup.id)
+unjudged_setups = pytest.mark.parametrize("setup", [s for s in SETUPS if not s.judge], ids=lambda setup: setup.id)
 
 
 @dataclass
@@ -50,52 +44,52 @@ def transcribe(engine, options, pdf, out, capsys) -> Written:
                    (out / f"{pdf.stem}.md").read_text(encoding="utf-8"), stderr)
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", SETUPS)
+@every_setup
 def test_a_document_runs_end_to_end_and_its_json_records_the_reader_and_the_judge_of_the_setup(
-        tmp_path, capsys, options, reader, judge, worker):
-    engine, fakes = engine_for(options, tmp_path / "engine")
+        tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
     fakes.read_as("some words")
-    done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     assert done.errors == {} and done.json["source"]["pages_failed"] == []
-    assert done.json["engine"]["reader"] == reader
-    assert done.json["engine"].get("judge") == judge
-    assert done.json["settings"]["reader"] == ("minicpm" if "minicpm" in options else "paddle")
-    assert done.json["settings"]["judge"] == bool(judge)
+    assert done.json["engine"]["reader"] == setup.reader
+    assert done.json["engine"].get("judge") == setup.judge
+    assert done.json["settings"]["reader"] == ("minicpm" if "minicpm" in setup.options else "paddle")
+    assert done.json["settings"]["judge"] == bool(setup.judge)
     assert [b["content"] for b in done.blocks] == ["some words", "some words"]
     assert done.markdown.count("some words") == 2
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", SETUPS)
+@every_setup
 def test_the_worker_and_the_judge_leave_their_marks_in_the_json_only_when_the_setup_has_them(
-        tmp_path, capsys, options, reader, judge, worker):
-    engine, fakes = engine_for(options, tmp_path / "engine")
+        tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
     fakes.read_as("some words")
-    done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
-    assert ("torch" in done.json["engine"]) == worker  # the library versions the worker reports
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert ("torch" in done.json["engine"]) == setup.worker  # the library versions the worker reports
     post = done.json["postprocessing"]
-    assert ("repetition_cuts" in post) == worker
-    assert ("judge" in post) == bool(judge)
-    assert all(("score" in b) == bool(judge) for b in done.blocks)
-    assert ("reread_schedule" in done.json["settings"]) == bool(judge)
-    if judge:
+    assert ("repetition_cuts" in post) == setup.worker
+    assert ("judge" in post) == bool(setup.judge)
+    assert all(("score" in b) == bool(setup.judge) for b in done.blocks)
+    assert ("reread_schedule" in done.json["settings"]) == bool(setup.judge)
+    if setup.judge:
         assert post["judge"]["blocks_judged"] == 2 and {b["verdict"] for b in done.blocks} == {"scored"}
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", SETUPS)
-def test_the_progress_line_names_the_judge_only_when_the_setup_has_it(tmp_path, capsys, options, reader, judge, worker):
-    engine, fakes = engine_for(options, tmp_path / "engine")
-    done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", capsys)
+@every_setup
+def test_the_progress_line_names_the_judge_only_when_the_setup_has_it(tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", capsys)
     lines = [ln for ln in done.stderr.splitlines() if ln.startswith("[")]
     assert [ln.split(" blocks")[0] for ln in lines] == ["[  1/2] page 1: 2", "[  2/2] page 2: 2"]
-    assert all(("judged flagged" in ln) == bool(judge) for ln in lines)
+    assert all(("judged flagged" in ln) == bool(setup.judge) for ln in lines)
     assert done.stderr.splitlines()[-1].startswith("wrote ")
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", JUDGED)
+@judged_setups
 @pytest.mark.parametrize("threshold, flagged", [("0.4", False), ("0.98", True)])
 def test_the_judge_flags_the_blocks_that_score_below_the_threshold_of_the_options(
-        tmp_path, capsys, options, reader, judge, worker, threshold, flagged):
-    options = [*options, "--judge-threshold", threshold]
+        tmp_path, capsys, setup, threshold, flagged):
+    options = [*setup.options, "--judge-threshold", threshold]
     engine, fakes = engine_for(options, tmp_path / "engine")  # every Reading scores 0.5
     done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     assert done.json["settings"]["judge_threshold"] == float(threshold)
@@ -110,21 +104,21 @@ SIMPLIFIED, REPAIRED = "银行医院", "銀行醫院"
 SCORES = {REPAIRED: ("scored", 0.99), SIMPLIFIED: ("scored", 0.2)}  # the Judge likes the Traditional text, not the other
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", JUDGED)
+@judged_setups
 def test_the_judge_scores_the_repaired_text_of_a_block_read_after_the_document_proved_traditional(
-        tmp_path, capsys, options, reader, judge, worker):
-    engine, fakes = engine_for(options, tmp_path / "engine")
+        tmp_path, capsys, setup):
+    engine, fakes = engine_for(setup.options, tmp_path / "engine")
     fakes.worker.scores = SCORES
     fakes.read_as(TRAD, SIMPLIFIED)  # the first Block makes the Document Traditional; the second is Simplified
-    done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     _, second = done.blocks
     assert (second["score"], second["flagged"]) == (0.99, False)  # judged as 銀行醫院
     assert (second["content"], second["content_raw"]) == (REPAIRED, SIMPLIFIED)  # the Document's own repair decided alone
 
 
-@pytest.mark.parametrize("options, reader, judge, worker", JUDGED)
-def test_with_the_script_repair_off_the_judge_scores_the_text_as_read(tmp_path, capsys, options, reader, judge, worker):
-    options = [*options, "--script", "off"]
+@judged_setups
+def test_with_the_script_repair_off_the_judge_scores_the_text_as_read(tmp_path, capsys, setup):
+    options = [*setup.options, "--script", "off"]
     engine, fakes = engine_for(options, tmp_path / "engine")
     fakes.worker.scores = SCORES
     fakes.read_as(TRAD, SIMPLIFIED)
@@ -179,11 +173,11 @@ def test_with_minicpm_alone_a_short_block_over_a_line_of_ink_is_re_read_by_the_w
     options = ["--reader", "minicpm"]
     engine, fakes = engine_for(options, tmp_path / "engine")
     fakes.pipe.blocks = [("text", INK_BOX)]
-    fakes.worker.texts = {"Text Recognition:": ["a", LONGER]}  # the first Reading, then the re-reads (the last repeats)
+    fakes.read_as("a", LONGER)  # the first Reading, then the re-reads (the last repeats)
     done = transcribe(engine, options, inked_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     (block,) = done.blocks
     assert (block["content_before_reread"], block["content"]) == ("a", LONGER)
-    assert re.search(r"re-read 1 short block\(s\)", done.stderr)
+    assert "re-read 1 short block(s)" in done.stderr
 
 
 # --- a Re-read that fails keeps the first Reading; a first read that fails fails the page --------------------------------
@@ -211,12 +205,11 @@ def engine_whose_reread_runs_out_of_memory(options, tmp_path):
     return engine
 
 
-@pytest.mark.parametrize("options", [pytest.param([], id="paddleocr-vl"),
-                                     pytest.param(["--reader", "minicpm"], id="minicpm")])
+@unjudged_setups
 def test_a_re_read_that_runs_out_of_memory_keeps_the_first_reading_and_does_not_fail_the_page(
-        tmp_path, capsys, options):
-    engine = engine_whose_reread_runs_out_of_memory(options, tmp_path / "engine")
-    done = transcribe(engine, options, inked_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+        tmp_path, capsys, setup):
+    engine = engine_whose_reread_runs_out_of_memory(setup.options, tmp_path / "engine")
+    done = transcribe(engine, setup.options, inked_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     assert done.errors == {} and done.json["source"]["pages_failed"] == []
     (block,) = done.blocks
     assert block["content"] == "a" and "content_before_reread" not in block
