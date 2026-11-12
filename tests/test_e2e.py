@@ -75,7 +75,7 @@ def test_second_run_gives_identical_markdown_and_json(cli_runs, sample_pdf):
     assert doc1 == doc2
 
 
-JUDGE_KEYS = {"score", "verdict", "below_threshold"}
+JUDGE_KEYS = {"score", "verdict", "flagged"}
 UNJUDGED_LABELS = {"chart", "seal", "image", "header_image", "footer_image"}
 
 
@@ -92,23 +92,23 @@ def test_with_the_judge_on_every_judged_block_has_a_score_a_verdict_and_a_flag(c
                                     "encode_error", "forward_error"}
             assert (b["score"] is not None) == (b["verdict"] == "scored")
             assert b["score"] is None or 0.0 <= b["score"] <= 1.0
-            assert b["below_threshold"] == (b["score"] is None or b["score"] < DEFAULT_JUDGE_THRESHOLD)
+            assert b["flagged"] == ("readings" in b or b["score"] is None or b["score"] < DEFAULT_JUDGE_THRESHOLD)
             judged += 1
     assert judged > 0
     assert doc["postprocessing"]["judge"]["blocks_judged"] == judged
 
 
-def test_stderr_reports_the_blocks_below_the_threshold_per_page_and_the_markdown_carries_no_scores(cli_runs, sample_pdf):
+def test_stderr_reports_the_flagged_blocks_per_page_and_the_markdown_carries_no_scores(cli_runs, sample_pdf):
     stderr = (cli_runs[0] / "stderr.txt").read_text(encoding="utf-8")
     md, doc = load(cli_runs[0], sample_pdf)
     page_lines = [ln for ln in stderr.splitlines() if ln.startswith("[") and "page" in ln]
     assert len(page_lines) == len(doc["pages"])
-    assert all("judged below the threshold" in ln for ln in page_lines)
+    assert all("judged flagged" in ln for ln in page_lines)
     for page in doc["pages"]:
         for b in page["blocks"]:
             if b.get("score") is not None:
                 assert str(b["score"]) not in md, "a Score leaked into the Markdown"
-    for key in ("below_threshold", "judged_before_script_decision", '"verdict"'):
+    for key in ('"flagged"', "judged_before_script_decision", '"verdict"'):
         assert key not in md
 
 
@@ -123,7 +123,7 @@ def test_no_judge_gives_no_scores_and_records_that_the_judge_was_off(cli_run_no_
         for b in page["blocks"]:
             assert not JUDGE_KEYS & b.keys()
     stderr = (cli_run_no_judge / "stderr.txt").read_text(encoding="utf-8")
-    assert "below the threshold" not in stderr
+    assert "judged flagged" not in stderr
 
 
 def test_the_markdown_is_the_same_whether_or_not_the_judge_ran_unless_the_ink_reread_changed_a_block(

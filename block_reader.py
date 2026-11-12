@@ -68,7 +68,6 @@ class ReadStep:
     samples: int               # Readings produced for each Block in this round
 
 
-# Spec #1: each step runs only while the best Score so far is below the threshold.
 SCHEDULE = (
     ReadStep(1, "greedy", None, 1.0, 1),        # the first Reading
     ReadStep(2, "greedy", None, 1.25, 1),
@@ -172,12 +171,12 @@ class BlockResult:
     score: float | None = None                 # a real Score, only with verdict "scored"
     verdict: str | None = None                 # None for a Block that was not judged
     verdict_detail: str | None = None
-    below_threshold: bool | None = None        # None for a Block that was not judged
+    flagged: bool | None = None                # decided by the first Reading; None for a Block that was not judged
     text_before_repair: str | None = None      # set when the sticky repair changed the Reading before judging
     judged_before_script_decision: bool = False  # judged before the document was known to be Traditional
     text_before_reread: str | None = None      # set when the ink-based re-read replaced the Reading
     readings: list[Reading] | None = None      # the distinct Readings, only for a Block that was re-read
-    stop_reason: str | None = None             # passed / exhausted / no_scored / judge_error / reader_error
+    stop_reason: str | None = None             # passed / exhausted / no_new_text / no_scored / judge_error / reader_error
     stop_detail: str | None = None
     skipped_rounds: list[dict] = field(default_factory=list)  # rounds the Reader cannot do, with the reason
 
@@ -274,9 +273,9 @@ def _score(judge: Judge, items: list[JudgeItem], owners: list[tuple[_Block, Read
         reading.score = v.score if v.verdict == SCORED else None  # a sentinel 0.0 or -1.0 is not a Score
 
 
-def _passed(block: _Block, settings: ReadSettings) -> bool:
-    best = block.best
-    return best is not None and best.score >= settings.threshold
+def _reaches(reading: Reading | None, threshold: float) -> bool:
+    return (reading is not None and reading.verdict == SCORED and reading.score is not None
+            and reading.score >= threshold)
 
 
 def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSettings) -> None:
@@ -289,7 +288,7 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
         if block.readings[0].verdict in NOT_SCORED_VERDICTS:
             continue  # the Judge is not working: there is no Score to improve on, so no re-read
         block.entered = True
-        if _passed(block, settings):
+        if _reaches(block.best, settings.threshold):
             block.stop = ("passed", None)
     for step in settings.schedule[1:]:
         active = [b for b in blocks if b.entered and b.stop is None]
@@ -339,8 +338,10 @@ def _reread(blocks: list[_Block], reader: Reader, judge: Judge, settings: ReadSe
             if b.stop is not None:
                 continue
             fresh = [r for r in b.readings if r.round == step.round]
-            if _passed(b, settings):
+            if _reaches(b.best, settings.threshold):
                 b.stop = ("passed", None)
+            elif not fresh:
+                b.stop = ("no_new_text", None)
             elif any(r.verdict in NOT_SCORED_VERDICTS for r in fresh):
                 detail = next(r.detail for r in fresh if r.verdict in NOT_SCORED_VERDICTS)
                 b.stop = ("judge_error", f"round {step.round}: {detail}")
@@ -353,7 +354,7 @@ def _finish(block: _Block, settings: ReadSettings) -> None:
     result.text, result.text_before_repair = winner.text, winner.text_before_repair
     result.judged_before_script_decision = winner.judged_before_script_decision
     result.verdict, result.verdict_detail, result.score = winner.verdict, winner.detail, winner.score
-    result.below_threshold = not (best is not None and best.score >= settings.threshold)
+    result.flagged = not _reaches(block.readings[0], settings.threshold)
     if not block.entered or block.produced == 1 and block.stop == ("passed", None):
         return  # not re-read: the first Reading's own verdict says it all
     stop = block.stop or ("exhausted" if best is not None else "no_scored", None)

@@ -6,7 +6,7 @@ import pytest
 
 pytestmark = pytest.mark.gpu
 
-STOP_REASONS = {"passed", "exhausted", "no_scored", "judge_error", "reader_error"}
+STOP_REASONS = {"passed", "exhausted", "no_new_text", "no_scored", "judge_error", "reader_error"}
 
 
 def load(out, pdf):
@@ -41,10 +41,12 @@ def test_a_re_read_block_has_readings_a_stop_reason_and_the_winners_content_and_
         if scored:
             assert b["score"] == max(scored)  # the highest Score wins, not the latest
             assert b["stop_reason"] != "no_scored"
-        if b["stop_reason"] == "exhausted":
-            assert b["below_threshold"] is True
+        assert b["flagged"] is True
+        if b["stop_reason"] == "no_new_text":
+            assert any(r.get("duplicates") for r in readings)
         if reader == "paddle":  # the local PaddleOCR-VL cannot sample: rounds 3 and 4 are recorded as skipped
-            assert [s["round"] for s in b["skipped_rounds"]] == [3, 4]
+            reached_round_3 = b["stop_reason"] in ("exhausted", "no_scored")
+            assert [s["round"] for s in b.get("skipped_rounds", [])] == ([3, 4] if reached_round_3 else [])
             assert {r["round"] for r in readings} <= {1, 2}
 
 
@@ -56,16 +58,16 @@ def test_blocks_that_were_not_re_read_have_no_readings_or_stop_reason(reread_run
                 assert not {"stop_reason", "skipped_rounds"} & b.keys()
 
 
-def test_the_postprocessing_and_stderr_report_re_read_blocks_and_those_still_below_the_threshold(
+def test_the_postprocessing_and_stderr_report_re_read_blocks_and_flagged_blocks(
         reread_runs, sample_pdf):
     doc = load(reread_runs[0], sample_pdf)
     judge = doc["postprocessing"]["judge"]
     judged = [b for p in doc["pages"] for b in p["blocks"] if "verdict" in b]
     assert judge["blocks_reread"] == len(reread_blocks(doc)) > 0
-    assert judge["blocks_below_threshold"] == sum(1 for b in judged if b["below_threshold"])
+    assert judge["blocks_flagged"] == sum(1 for b in judged if b["flagged"])
     assert sum(judge["reread_stop_reasons"].values()) == judge["blocks_reread"]
     stderr = (reread_runs[0] / "stderr.txt").read_text(encoding="utf-8")
     page_lines = [ln for ln in stderr.splitlines() if ln.startswith("[") and "page" in ln]
     assert len(page_lines) == len(doc["pages"])
-    assert all("judged below the threshold" in ln and " re-read" in ln for ln in page_lines)
-    assert sum(int(ln.split("threshold, ")[1].split(" re-read")[0]) for ln in page_lines) == judge["blocks_reread"]
+    assert all("judged flagged" in ln and " re-read" in ln for ln in page_lines)
+    assert sum(int(ln.split("flagged, ")[1].split(" re-read")[0]) for ln in page_lines) == judge["blocks_reread"]

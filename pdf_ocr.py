@@ -110,10 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
                         "ink-based re-read of implausibly short blocks runs instead")
     g.add_argument("--judge-threshold", type=unit_interval, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
-                   help="blocks scoring below this are re-read (up to 10 Readings, the best one is kept) and, if "
-                        "still below it, flagged (below_threshold) in the JSON and counted on stderr. 0 turns the "
-                        "re-reading off and keeps the Scores. The Judge authors' own value, 0.98, flags and re-reads "
-                        "most Blocks for no gain on the measured document; see the README (default: %(default)s)")
+                   help="blocks whose first Reading scores below this are re-read (up to 10 Readings, stopping after "
+                        "a round that reads no new text; the best one is kept) and flagged in the JSON (flagged) and "
+                        "counted on stderr. A re-read never clears the flag; a block whose first Reading could not be "
+                        "scored is flagged too. 0 turns the re-reading off and keeps the Scores. The Judge authors' "
+                        "own value, 0.98, flags and re-reads most Blocks for no gain on the measured document; see "
+                        "the README (default: %(default)s)")
     g.add_argument("--no-recover", action="store_true",
                    help="with --no-judge, do not re-read blocks whose text is implausibly short for the ink they "
                         "contain (with the Judge on, that re-read never runs)")
@@ -671,7 +673,7 @@ def add_judge_fields(block: dict, outcome) -> None:
         return
     block["score"] = None if outcome.score is None else round(outcome.score, 6)
     block["verdict"] = outcome.verdict
-    block["below_threshold"] = outcome.below_threshold
+    block["flagged"] = outcome.flagged
     if outcome.verdict_detail and outcome.verdict != "scored":
         block["verdict_detail"] = outcome.verdict_detail
     if outcome.judged_before_script_decision:
@@ -715,8 +717,8 @@ def undo_sticky_repair(ok: list[tuple[int, object]], outcomes: dict) -> int:
 
 
 def judge_summary(outcomes: dict) -> dict:
-    """The JSON `postprocessing.judge` section: how many Blocks were judged, re-read and still flagged (below the
-    threshold after re-reading), and with which verdicts."""
+    """The JSON `postprocessing.judge` section: how many Blocks were judged, re-read and flagged, and with which
+    verdicts."""
     judged = [o for o in outcomes.values() if o.judged]
     verdicts: dict[str, int] = {}
     for o in judged:
@@ -727,7 +729,7 @@ def judge_summary(outcomes: dict) -> dict:
         stops[o.stop_reason] = stops.get(o.stop_reason, 0) + 1
     return {"blocks_judged": len(judged),
             "blocks_reread": len(reread),
-            "blocks_below_threshold": sum(1 for o in judged if o.below_threshold),  # after re-reading
+            "blocks_flagged": sum(1 for o in judged if o.flagged),
             "reread_stop_reasons": dict(sorted(stops.items())),
             "readings_beyond_the_first": sum(sum(1 + r.duplicates for r in o.readings) - 1 for o in reread),
             "verdicts": dict(sorted(verdicts.items())),
@@ -749,7 +751,7 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
     """One progress line on stderr."""
     line = f"[{n:>3}/{total}] page {page_no}: {n_blocks} blocks, {seconds:.1f}s"
     if summary is not None:
-        line += (f", {summary['below_threshold']} of {summary['judged']} judged below the threshold, "
+        line += (f", {summary['flagged']} of {summary['judged']} judged flagged, "
                  f"{summary['reread']} re-read")
         if summary["not_scored"]:
             line += f" ({summary['not_scored']} not scored)"
