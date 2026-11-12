@@ -1,11 +1,12 @@
 """Test doubles shared by the bridge and the Run tests: the worker, the PaddleX pipe and PaddleOCR-VL's own model, and
-`engine_for`, which builds an Engine from an option list out of them."""
+`engine_for`, which builds an Engine from an option list out of them, and `SETUPS`, the four Reader x Judge setups."""
 import argparse
 import collections
 from dataclasses import dataclass
 from pathlib import Path
 
 import pypdfium2 as pdfium
+from PIL import Image, ImageDraw
 
 import pdf_ocr
 from reader_bridge import BlockQuery, MiniCPMBridge, PaddleBridge
@@ -171,6 +172,25 @@ class FakePaddle:
         pass
 
 
+@dataclass(frozen=True)
+class Setup:
+    """One of the four Reader x Judge setups: the options that choose it and what a Run of it writes and starts."""
+
+    id: str
+    options: tuple[str, ...]
+    reader: str          # the Reader folder in the JSON
+    judge: str | None    # the Judge folder in the JSON; None without --judge
+    worker: bool         # whether a Run of it starts the worker
+
+
+SETUPS = [
+    Setup("paddleocr-vl", (), "PaddleOCR-VL-1.6", None, False),
+    Setup("paddleocr-vl+judge", ("--judge",), "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev", True),
+    Setup("minicpm", ("--reader", "minicpm"), "MiniCPM-OCR-1.0", None, True),
+    Setup("minicpm+judge", ("--reader", "minicpm", "--judge"), "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev", True),
+]
+
+
 @dataclass
 class Fakes:
     """What a test steers in an Engine that `engine_for` built: only what is outside the Engine."""
@@ -181,20 +201,28 @@ class Fakes:
 
     def read_as(self, *texts: str) -> None:
         """Every text Block now reads as `texts[0]`; with more texts, the n-th Block read reads as the n-th (the last
-        repeats). The same for whichever of the worker and PaddleOCR-VL reads; the pipe alone reads one text. Several
-        texts count from the Engine's first read, so give them before the first page is read."""
+        repeats). The same for whichever of the worker and PaddleOCR-VL reads; the pipe alone reads one text for every
+        Block, and a ValueError says so when given more. Several texts count from the Engine's first read, so give them
+        before the first page is read."""
         if self.paddle is not None:
             self.paddle.texts, self.paddle.asked = {"OCR:": list(texts)}, collections.Counter()
         elif self.worker is not None:
             self.worker.texts = {"Text Recognition:": list(texts)}
+        elif len(texts) == 1:
+            self.pipe.reads = texts[0]
         else:
-            (self.pipe.reads,) = texts
+            raise ValueError(f"the pipe alone reads one text for every Block, but read_as was given {len(texts)}")
 
 
 def engine_for(options, tmp_path, *, worker=None):
     """A loaded Engine (what `load_engine` returns) for an option list (or the parsed options of a Run), built the way
     a Run builds it: `load_engine` and `attach_worker` in pdf_ocr.py, with the PaddleX pipe and the worker faked.
-    Returns the Engine and the `Fakes` that steer it. `worker` is the FakeClient to use, if the test made its own."""
+    Returns the Engine and the `Fakes` that steer it. `worker` is the FakeClient to use, if the test made its own.
+
+    It mirrors `attach_worker` and `load_engine` by hand, on purpose (the real functions need a worker), so a change
+    to the Reader x Judge wiring there must be mirrored here until the Engine spec (#31) replaces this function.
+    It differs from a Run in three places: the bridge has no `after_read` (nothing to free in paddle's GPU cache),
+    `to_html` converts nothing, and the Engine has the device "cpu" and no `load_started`."""
     args = options if isinstance(options, argparse.Namespace) else pdf_ocr.parse_args(["in.pdf", *options])
     ink = pdf_ocr.InkReread()
     if not pdf_ocr.needs_worker(args):  # PaddleOCR-VL alone: no worker, no bridge, no Reader hook
@@ -242,8 +270,6 @@ def blank_pdf(path, pages=1, height=300):
 def inked_pdf(path):
     """A one-page PDF, 200 x 300 points, with a line of ink in INK_BOX (at 216 dpi: 240 x 24 pixels of black, about ten
     glyph widths) and nothing else."""
-    from PIL import Image, ImageDraw
-
     image = Image.new("RGB", (200, 300), "white")
     ImageDraw.Draw(image).rectangle([20, 30, 99, 37], fill="black")
     image.save(path, "PDF", resolution=72.0)
