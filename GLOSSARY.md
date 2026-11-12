@@ -68,8 +68,8 @@ of settings.
 _Avoid_: batch, job
 
 **Already done**:
-A Document whose JSON from an earlier Run shows the same PDF, no failed page, and the same settings and model
-names as this Run would write. A folder Run skips it unless `--force`.
+A Document whose JSON from an earlier Run shows the same PDF, every page transcribed and none failed, and the same
+settings and model names as this Run would write. A folder Run skips it unless `--force`.
 _Avoid_: finished, cached, up to date
 
 **Engine**:

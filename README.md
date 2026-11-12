@@ -22,7 +22,8 @@ for the length of the run. It is still one command, and you never start the work
 
 You need Python 3.13 and [uv](https://docs.astral.sh/uv/). `pyproject.toml` pins `paddlepaddle-gpu` 3.3.1
 from the CUDA 13.0 Paddle index. It also pulls in `paddleocr[doc-parser]` and `opencc-python-reimplemented`,
-which the Simplified to Traditional repair needs.
+which the Simplified to Traditional repair needs. If opencc cannot be imported, a run with `--script auto` (the
+default) stops before anything loads and tells you to run `uv sync`. A run with `--script off` does not need opencc.
 
 ```bash
 uv sync                      # the main environment: the Layout model, PaddleOCR and PaddleOCR-VL (all a plain run needs)
@@ -161,7 +162,7 @@ Before any model loads, and with nothing written, the run stops with an error wh
 - two Documents would write to one output folder (`a.pdf` and `a.PDF` side by side);
 - a Document's output folder would lie inside another's `imgs/` or `csv/` (`a.pdf` and `a/csv/b.pdf`).
 
-The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, worker
+The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, opencc, worker
 environment, the Judge's renderer) come next and also stop the run before the first Document.
 
 A PDF that cannot be opened, or has no pages, is reported, counted as failed and gets no JSON, and the run goes
@@ -195,7 +196,12 @@ A run on a folder skips the Documents that are already done. An interrupted run 
 stopped, and after you add PDFs to the folder only the new ones are processed. A Document is done when its
 `<name>.json` in the output folder reads cleanly and all of these hold:
 - `source.sha256` is the PDF's sha256: the PDF has not changed.
+- `source.pages_processed` lists every page from 1 to `source.page_count`: a Document that a single-PDF run
+  transcribed with `--pages` for only some of its pages is transcribed again, in full.
 - `source.pages_failed` is empty: a Document with failed pages is tried again.
+- `postprocessing.script_repair` has no `skipped`. Older versions skipped the Simplified to Traditional repair when
+  opencc could not be imported, and recorded that only there. The next run redoes such a Document once opencc is
+  installed. While opencc is still missing, a run with `--script auto` stops at the setup check instead (see "Setup").
 - `settings` equals the `settings` this run would write. Any option that shapes the output (`--reader`, `--dpi`,
   `--judge`, `--judge-threshold`, `--script`, `--no-page-markers`, `--no-csv`, ...) therefore makes every
   Document count as not done; options that do not (`-v`, `--device`, `--models-dir`) change nothing. A folder
@@ -206,6 +212,11 @@ stopped, and after you add PDFs to the folder only the new ones are processed. A
 Library versions and the device are not compared, so a `uv sync` or another GPU redoes nothing. A JSON that is
 missing, cut off by a kill, not JSON, or missing one of the fields above makes the Document not done. A PDF that
 could not be opened has no JSON, so the next run tries it again. A skipped Document is not touched.
+
+A Document whose cross-page restructuring failed still counts as done. That run printed a warning and wrote the
+Markdown page by page, without merged tables or re-levelled titles, and the JSON records the error as
+`postprocessing.restructuring_failed`. A new run would read the same text and most likely fail the same way, so only
+`--force` redoes such a Document.
 
 The check reads the JSONs and hashes the PDFs, and nothing else. When every Document is done, the run prints the
 summary and exits 0 without the setup checks and without loading a model, in seconds. The collisions of output
@@ -267,7 +278,9 @@ The JSON has these top-level keys:
   re-reads included, as `repetition_cuts` does. Without the worker (the default, PaddleOCR-VL without `--judge`) it
   counts the symbols in the written blocks. In `script_repair`, `applied` is true when the document was decided Traditional, and
   `blocks_changed` counts the blocks the repair changed, whether for a Simplified character or only for a `≥`/`≤`
-  glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`.
+  glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`. `restructuring_failed` is there only
+  when the cross-page restructuring of the Markdown failed, and holds the error as the warning on stderr shows it
+  (see "Running a folder again").
 - `csv_tables`: which tables were exported and which were skipped.
 - `elapsed_seconds`: for a single PDF, counted from the start of the model load. In a folder run, the Document's
   own time, without the shared model load.

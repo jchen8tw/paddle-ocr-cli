@@ -2,6 +2,7 @@
 `engine_for`, which builds an Engine from an option list out of them, and `SETUPS`, the four Reader x Judge setups."""
 import argparse
 import collections
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -230,12 +231,7 @@ def engine_for(options, tmp_path, *, worker=None):
     client = worker or FakeClient(default_score=0.5)  # every Reading scores below a high threshold: all re-read Rounds run
     crops = tmp_path / "crops"
     crops.mkdir(parents=True, exist_ok=True)
-    repair = None
-    if args.judge and args.script == "auto":
-        try:
-            repair = StickyScriptRepair(ScriptRepair())
-        except ImportError:
-            pass  # as in attach_worker: then the Judge judges the text as read
+    repair = StickyScriptRepair(ScriptRepair()) if args.judge and args.script == "auto" else None
     common = dict(to_html=lambda s: "", judge=args.judge, repair=repair,
                   **({"judge_threshold": args.judge_threshold} if args.judge else {}))
     paddle = None
@@ -251,6 +247,20 @@ def engine_for(options, tmp_path, *, worker=None):
              "judge": pdf_ocr.JUDGE_MODEL_DIR if args.judge else None, "versions": {"torch": "0.0"}}
     pipe = FakePipe(bridge)
     return pdf_ocr.Engine(pipe, "cpu", bridge, ink, ready), Fakes(pipe, client, paddle)
+
+
+def empty_models_dir(tmp_path):
+    d = tmp_path / "models"
+    for name in ("PP-DocLayoutV3", "PaddleOCR-VL-1.6"):
+        (d / name).mkdir(parents=True)
+    return d
+
+
+def without_opencc(monkeypatch):
+    monkeypatch.setitem(sys.modules, "opencc", None)
+
+
+REPAIR_SKIPPED_BY_AN_OLD_RUN = {"mode": "auto", "applied": False, "skipped": "opencc not installed"}
 
 
 # A page whose ink (see `inked_pdf`) fills INK_BOX of a 216 dpi render: the box of a Block a test puts there.

@@ -69,11 +69,6 @@ def test_the_same_readings_in_the_same_order_give_the_same_repairs():
     assert runs[0] == runs[1]
 
 
-def test_without_opencc_nothing_is_repaired_and_the_run_goes_on():
-    s = StickyScriptRepair(None)
-    assert s.apply(TRAD + SIMP, "text") == (TRAD + SIMP, False)
-
-
 def test_a_reset_starts_a_new_document_that_is_not_decided_and_has_no_evidence():
     s = sticky()
     s.apply(TRAD, "text")
