@@ -8,7 +8,8 @@ import time
 import pytest
 
 import pdf_ocr
-from fakes import REPAIR_SKIPPED_BY_AN_OLD_RUN, FakeClient, blank_pdf, empty_models_dir, engine_for, without_opencc
+from fakes import (REPAIR_SKIPPED_BY_AN_OLD_RUN, FakeClient, FakeVLPipe, blank_pdf, empty_models_dir, engine_for,
+                   without_opencc)
 
 
 def run_refused(argv, capsys):
@@ -291,6 +292,25 @@ def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path
     assert pdf_ocr.main([*argv, "--no-page-markers"]) == 0
     assert "1 Documents: 1 written, 0 skipped, 0 failed" in capsys.readouterr().err
     assert "<!-- page 1 -->" not in (tmp_path / "out" / "a" / "a.md").read_text(encoding="utf-8")
+
+
+def test_a_failed_cross_page_restructuring_is_recorded_in_the_json_and_the_document_stays_done(
+        tmp_path, capsys, monkeypatch, loaded):
+    def broken(self, results, **options):
+        raise RuntimeError("the merge broke")
+
+    monkeypatch.setattr(FakeVLPipe, "restructure_pages", broken)
+    folder, out = folder_of(tmp_path, "a.pdf"), tmp_path / "out"
+    argv = [str(folder), "-o", str(out)]
+    assert pdf_ocr.main(argv) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert ("warning: cross-page restructuring failed (RuntimeError: the merge broke); Markdown is written per page "
+            "without merged tables or re-levelled titles") in lines
+    assert lines[-1] == "1 Documents: 1 written, 0 skipped, 0 failed"
+    assert read_json(out / "a" / "a.json")["postprocessing"]["restructuring_failed"] == "RuntimeError: the merge broke"
+    assert pdf_ocr.main(argv) == 0
+    assert "[1/1] a.pdf skipped: already done" in capsys.readouterr().err.splitlines()
+    assert loaded.loads == 1
 
 
 # --- --script auto needs opencc: a Run without it stops at the setup checks ------------------------------------------

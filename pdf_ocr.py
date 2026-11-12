@@ -1081,9 +1081,10 @@ def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str
     """None when the JSON an earlier Run left for `document` reads cleanly and shows it is Already done: the PDF is the
     same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, the script repair was not
     skipped (`postprocessing.script_repair.skipped`), and the `settings` and the Engine's model names
-    (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it
-    has to be processed. A JSON that is missing, cut off or lacks a field is never an error. Library versions and the
-    device are not compared."""
+    (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it has to be processed. A JSON that is missing,
+    cut off or lacks a field is never an error. Library versions and the device are not compared, and a failed
+    cross-page restructuring (`postprocessing.restructuring_failed`) is not read: the Document stays done, and --force
+    redoes it."""
     json_path = document.out_dir / f"{document.path.stem}.json"
     try:
         existing = json.loads(json_path.read_text(encoding="utf-8"))
@@ -1279,6 +1280,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     # Cross-page restructuring is for the Markdown only: it moves the content of a table that
     # continues over a page break into one table and re-levels the headings.
     restructured: list[tuple[int, object]] = []
+    restructuring_failed = None
     try:
         for group in contiguous_groups(ok):
             out = pipe.restructure_pages(
@@ -1287,7 +1289,8 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
             )
             restructured.extend(zip((i for i, _ in group), out))
     except Exception as e:  # the OCR result is too expensive to lose over a formatting step
-        print(f"warning: cross-page restructuring failed ({type(e).__name__}: {e}); "
+        restructuring_failed = f"{type(e).__name__}: {e}"
+        print(f"warning: cross-page restructuring failed ({restructuring_failed}); "
               "Markdown is written per page without merged tables or re-levelled titles", file=sys.stderr)
         restructured = ok
     md_parts = {idx: page_markdown(idx, r, out_dir, not args.no_page_markers) for idx, r in restructured}
@@ -1316,6 +1319,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
             "script_repair": script_info,
             **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
                if bridge and args.judge else {}),
+            **({"restructuring_failed": restructuring_failed} if restructuring_failed else {}),
         },
         "csv_tables": csv_info,
         "elapsed_seconds": round(time.time() - t_start, 1),

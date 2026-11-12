@@ -213,6 +213,11 @@ Library versions and the device are not compared, so a `uv sync` or another GPU 
 missing, cut off by a kill, not JSON, or missing one of the fields above makes the Document not done. A PDF that
 could not be opened has no JSON, so the next run tries it again. A skipped Document is not touched.
 
+A Document whose cross-page restructuring failed still counts as done. That run printed a warning and wrote the
+Markdown page by page, without merged tables or re-levelled titles, and the JSON records the error as
+`postprocessing.restructuring_failed`. A new run would read the same text and most likely fail the same way, so only
+`--force` redoes such a Document.
+
 The check reads the JSONs and hashes the PDFs, and nothing else. When every Document is done, the run prints the
 summary and exits 0 without the setup checks and without loading a model, in seconds. The collisions of output
 folders are still checked among all the Documents, the skipped ones included.
@@ -273,7 +278,9 @@ The JSON has these top-level keys:
   re-reads included, as `repetition_cuts` does. Without the worker (the default, PaddleOCR-VL without `--judge`) it
   counts the symbols in the written blocks. In `script_repair`, `applied` is true when the document was decided Traditional, and
   `blocks_changed` counts the blocks the repair changed, whether for a Simplified character or only for a `≥`/`≤`
-  glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`.
+  glyph. `big5_symbols_changed` counts the `≥` and `≤` written as `≧` and `≦`. `restructuring_failed` is there only
+  when the cross-page restructuring of the Markdown failed, and holds the error as the warning on stderr shows it
+  (see "Running a folder again").
 - `csv_tables`: which tables were exported and which were skipped.
 - `elapsed_seconds`: for a single PDF, counted from the start of the model load. In a folder run, the Document's
   own time, without the shared model load.

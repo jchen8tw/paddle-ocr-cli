@@ -76,6 +76,16 @@ def test_the_worker_and_the_judge_leave_their_marks_in_the_json_only_when_the_se
 
 
 @every_setup
+def test_a_json_whose_cross_page_restructuring_worked_has_the_postprocessing_keys_it_always_had(
+        tmp_path, capsys, setup):
+    engine, _ = engine_for(setup.options, tmp_path / "engine")
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert list(done.json["postprocessing"]) == [
+        "tables_with_line_breaks_fixed", *(["repetition_cuts"] if setup.worker else []), "latex_symbols_unwrapped",
+        "script_repair", *(["judge"] if setup.judge else [])]
+
+
+@every_setup
 def test_the_progress_line_names_the_judge_only_when_the_setup_has_it(tmp_path, capsys, setup):
     engine, fakes = engine_for(setup.options, tmp_path / "engine")
     done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", capsys)
