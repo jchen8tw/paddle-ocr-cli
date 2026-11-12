@@ -269,6 +269,19 @@ def test_force_redoes_every_document(tmp_path, capsys, loaded):
     assert snapshot(tmp_path / "out").keys() == first.keys()
 
 
+def test_a_document_transcribed_for_some_pages_is_transcribed_again_in_full_by_a_folder_run(tmp_path, capsys, loaded):
+    folder = folder_of(tmp_path, "a.pdf", pages=3)
+    out = tmp_path / "out"
+    assert pdf_ocr.main([str(folder / "a.pdf"), "-o", str(out / "a"), "--pages", "1"]) == 0
+    assert read_json(out / "a" / "a.json")["source"]["pages_processed"] == [1]
+    capsys.readouterr()
+    assert pdf_ocr.main([str(folder), "-o", str(out)]) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == f"found 1 Documents in {folder} (0 already done)" and "[1/1] a.pdf (3 pages)" in lines
+    assert lines[-1] == "1 Documents: 1 written, 0 skipped, 0 failed"
+    assert read_json(out / "a" / "a.json")["source"]["pages_processed"] == [1, 2, 3]
+
+
 def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "a.pdf")
     argv = [str(folder), "-o", str(tmp_path / "out")]

@@ -20,12 +20,12 @@ def options(folder, out, *argv, base=JUDGE_ON):
     return pdf_ocr.parse_args([str(folder), "-o", str(out), *base, *argv])
 
 
-def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, base=JUDGE_ON):
+def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, base=JUDGE_ON, pages=1):
     """A folder of blank PDFs, and the output root that a Run of them with `base` and `argv` left behind."""
     folder, out = tmp_path / "docs", tmp_path / "out"
     for name in names:
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
-        blank_pdf(folder / name)
+        blank_pdf(folder / name, pages)
     args = options(folder, out, *argv, base=base)
     engine, fakes = engine_for(args, tmp_path / "engine")
     if fail_pages:
@@ -86,6 +86,14 @@ def test_a_document_with_failed_pages_is_not_done(tmp_path):
     plan_ = plan(folder, out)
     assert [d.done for d in plan_.values()] == [False, False]
     assert "failed" in plan_["a.pdf"].reason
+
+
+def test_a_json_that_covers_only_some_of_the_pages_is_not_done_and_its_reason_names_them(tmp_path):
+    folder, out = written(tmp_path, pages=3)
+    edit(json_of(out), lambda doc: doc["source"].update(pages_processed=[1, 3]))
+    plan_ = plan(folder, out)
+    assert not plan_["a.pdf"].done and "1, 3 of 3" in plan_["a.pdf"].reason
+    assert plan_["sub/b.pdf"].done
 
 
 @pytest.mark.parametrize("changed, key", [
@@ -182,6 +190,8 @@ def test_a_folder_where_the_json_should_be_is_not_done_and_never_an_error(tmp_pa
     lambda doc: doc.pop("source"),
     lambda doc: doc["source"].pop("sha256"),
     lambda doc: doc["source"].pop("pages_failed"),
+    lambda doc: doc["source"].pop("page_count"),
+    lambda doc: doc["source"].pop("pages_processed"),
     lambda doc: doc.pop("settings"),
     lambda doc: doc.pop("engine"),
     lambda doc: doc["settings"].pop("script"),
@@ -193,6 +203,8 @@ def test_a_folder_where_the_json_should_be_is_not_done_and_never_an_error(tmp_pa
     lambda doc: doc.update(engine="MiniCPM"),
     lambda doc: doc["source"].update(pages_failed=None),
     lambda doc: doc["source"].update(sha256=None),
+    lambda doc: doc["source"].update(page_count="1"),
+    lambda doc: doc["source"].update(pages_processed=None),
 ])
 def test_a_json_missing_a_field_is_not_done_and_never_an_error(tmp_path, remove):
     folder, out = written(tmp_path)

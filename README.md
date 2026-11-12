@@ -195,6 +195,8 @@ A run on a folder skips the Documents that are already done. An interrupted run 
 stopped, and after you add PDFs to the folder only the new ones are processed. A Document is done when its
 `<name>.json` in the output folder reads cleanly and all of these hold:
 - `source.sha256` is the PDF's sha256: the PDF has not changed.
+- `source.pages_processed` lists every page from 1 to `source.page_count`: a Document that a single-PDF run
+  transcribed with `--pages` for only some of its pages is transcribed again, in full.
 - `source.pages_failed` is empty: a Document with failed pages is tried again.
 - `settings` equals the `settings` this run would write. Any option that shapes the output (`--reader`, `--dpi`,
   `--judge`, `--judge-threshold`, `--script`, `--no-page-markers`, `--no-csv`, ...) therefore makes every
