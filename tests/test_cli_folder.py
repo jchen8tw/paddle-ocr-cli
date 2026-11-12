@@ -79,7 +79,7 @@ class Loaded:
             monkeypatch.setattr(pdf_ocr, "check_setup", self.check_setup)
         monkeypatch.setattr(pdf_ocr, "load_engine", self.load_engine)
 
-    def check_setup(self, args):
+    def check_setup(self, spec, models_dir):
         self.checks += 1
 
     def load_engine(self, args, stack):

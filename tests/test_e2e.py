@@ -28,15 +28,15 @@ def load(out: Path, pdf: Path) -> tuple[str, dict]:
 def test_output_structure(config_runs, config, sample_pdf):
     out = config_runs[0]
     md, doc = load(out, sample_pdf)
-    options = config.options
+    spec = config.spec
 
     assert md.strip()
     assert {"source", "engine", "settings", "postprocessing", "csv_tables", "elapsed_seconds", "pages"} == doc.keys()
     assert config.record["settings"].items() <= doc["settings"].items()
     assert doc["engine"]["layout_model"] == "PP-DocLayoutV3"
-    assert doc["engine"]["reader"] == pdf_ocr.READER_MODEL_DIRS[options.reader]
-    assert ("judge" in doc["engine"]) == options.judge
-    assert ("torch" in doc["engine"]) == pdf_ocr.needs_worker(options)
+    assert doc["engine"]["reader"] == pdf_ocr.READER_MODEL_DIRS[spec.reader]
+    assert ("judge" in doc["engine"]) == spec.judge
+    assert ("torch" in doc["engine"]) == spec.needs_worker
     assert {"tables_with_line_breaks_fixed", "latex_symbols_unwrapped", "script_repair"} <= doc["postprocessing"].keys()
     assert doc["source"]["file"] == sample_pdf.name
     assert doc["source"]["pages_failed"] == []

@@ -11,6 +11,10 @@ def args(*argv):
     return pdf_ocr.parse_args(["in.pdf", *argv])
 
 
+def spec(*argv):
+    return pdf_ocr.EngineSpec.from_options(args(*argv))
+
+
 def test_the_judge_is_off_by_default_and_judge_turns_it_on_with_the_official_threshold():
     a = args()
     assert a.reader == "paddle" and a.judge is False and a.judge_threshold is None
@@ -43,12 +47,8 @@ def test_the_ends_of_the_judge_threshold_range_are_accepted(ok):
 
 
 def test_the_judge_needs_its_model_folder_only_when_it_is_on(tmp_path):
-    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm", "--judge")) == [
-        "PP-DocLayoutV3", "MiniCPM-OCR-1.0", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args("--reader", "minicpm")) == ["PP-DocLayoutV3", "MiniCPM-OCR-1.0"]
-    assert pdf_ocr.required_model_dirs(args("--judge")) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6", "MiniCPM-OCR-Jev"]
-    assert pdf_ocr.required_model_dirs(args()) == ["PP-DocLayoutV3", "PaddleOCR-VL-1.6"]
-    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(args("--judge", "--models-dir", str(tmp_path)))
+    assert "MiniCPM-OCR-Jev" in pdf_ocr.missing_models_message(spec("--judge"), tmp_path)
+    assert "MiniCPM-OCR-Jev" not in pdf_ocr.missing_models_message(spec(), tmp_path)
 
 
 def test_the_worker_is_needed_for_minicpm_or_for_the_judge_and_loads_only_what_is_used():

@@ -322,19 +322,14 @@ def pick_device(requested: str | None) -> str:
     return "cpu"
 
 
-def required_model_dirs(args) -> list[str]:
-    """The folders of --models-dir that the chosen options use (and nothing else)."""
-    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader], *([JUDGE_MODEL_DIR] if args.judge else [])]
-
-
-def missing_models_message(args) -> str | None:
-    missing = [d for d in required_model_dirs(args) if not (args.models_dir / d).is_dir()]
+def missing_models_message(spec: EngineSpec, models_dir: Path) -> str | None:
+    missing = [d for d in spec.model_dirs if not (models_dir / d).is_dir()]
     if not missing:
         return None
-    other = "paddle" if args.reader == "minicpm" else "minicpm"
-    return (f"model folder(s) not found under {args.models_dir}: {', '.join(missing)}. "
+    other = "paddle" if spec.reader == "minicpm" else "minicpm"
+    return (f"model folder(s) not found under {models_dir}: {', '.join(missing)}. "
             f"Put them there (nothing is downloaded at run time); --reader {other} needs "
-            f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
+            f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[spec.reader]}.")
 
 
 WORKER_FREE = "a run without --reader minicpm and --judge does not need it"
@@ -1162,21 +1157,21 @@ def open_document(path: Path, pages: str | None) -> Document:
         raise DocumentError(str(e)) from None
 
 
-def check_setup(args) -> None:
-    """Exit with an error unless the models, opencc, the worker environment and the Judge's renderer that the options
-    need are in place. Done once per Run, before anything is loaded."""
-    if msg := missing_models_message(args):
+def check_setup(spec: EngineSpec, models_dir: Path) -> None:
+    """Exit with an error unless the models, opencc, the worker environment and the Judge's renderer that the Run
+    needs are in place. Done once per Run, before anything is loaded."""
+    if msg := missing_models_message(spec, models_dir):
         sys.exit(f"error: {msg}")
-    if args.script == "auto":
+    if spec.script == "auto":
         try:
             importlib.import_module("opencc")
         except ImportError:
             sys.exit("error: --script auto (the default) repairs Simplified drift with opencc, which cannot be "
                      "imported. Install it with:  uv sync   (or run with --script off, which keeps the raw model "
                      "output)")
-    if needs_worker(args) and (problem := worker_env_problem()):
+    if spec.needs_worker and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
-    if args.judge and (problems := judge_setup_problems()):
+    if spec.judge and (problems := judge_setup_problems()):
         sys.exit("error: --judge needs the Judge's renderer, which is not set up (or run without --judge):\n  - "
                  + "\n  - ".join(problems))
 
@@ -1309,13 +1304,13 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     return errors
 
 
-def transcribe(args) -> int:
+def transcribe(spec: EngineSpec, args) -> int:
     """A Run on one PDF: load the Engine, then transcribe the Document."""
     import contextlib
 
     if not args.pdf.is_file():
         sys.exit(f"error: no such file: {args.pdf}")
-    check_setup(args)
+    check_setup(spec, args.models_dir)
     try:
         document = open_document(args.pdf, args.pages)
     except DocumentError as e:
@@ -1328,7 +1323,7 @@ def transcribe(args) -> int:
     return 1 if errors else 0
 
 
-def transcribe_folder(args) -> int:
+def transcribe_folder(spec: EngineSpec, args) -> int:
     """A Run on every Document under a folder: plan it, and if any Document is not already done, check the setup, load
     the Engine once and transcribe those Documents one at a time. A Document that fails is reported and the Run goes
     on. A Run with nothing left to do touches no model. Documents are numbered by their place in the whole Run."""
@@ -1354,7 +1349,7 @@ def transcribe_folder(args) -> int:
 
     with contextlib.ExitStack() as stack:
         if todo:
-            check_setup(args)
+            check_setup(spec, args.models_dir)
             engine = load_engine(args, stack)
         for label, planned in todo:
             document = None
@@ -1384,12 +1379,13 @@ def transcribe_folder(args) -> int:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    spec = EngineSpec.from_options(args)
     # Skip model-hoster connectivity checks and quiet noisy third-party output before importing paddle.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     if not args.verbose:
         warnings.filterwarnings("ignore", message=".*ccache.*")
         warnings.filterwarnings("ignore", message=".*copy construct from a tensor.*")
-    return transcribe_folder(args) if args.pdf.is_dir() else transcribe(args)
+    return transcribe_folder(spec, args) if args.pdf.is_dir() else transcribe(spec, args)
 
 
 if __name__ == "__main__":
