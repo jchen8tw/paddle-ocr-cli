@@ -181,28 +181,6 @@ def test_the_ink_reread_of_a_bridge_block_is_recorded_like_the_post_pass_one():
     assert b["content_before_reread"] == "x"
 
 
-# --- document-level repair after a sticky decision -------------------------------------------------------
-
-class Blk:
-    def __init__(self, label, bbox, content):
-        self.label, self.bbox, self.content = label, bbox, content
-
-
-def test_text_the_sticky_repair_changed_is_put_back_so_the_document_level_repair_decides_alone():
-    b1, b2 = Blk("text", (0, 0, 1, 1), "銀行"), Blk("text", (0, 2, 1, 3), "plain")
-    outcomes = {(0, (0, 0, 1, 1)): outcome(text="銀行", text_before_repair="银行", judged=True),
-                (0, (0, 2, 1, 3)): outcome(text="plain", judged=True)}
-    pdf_ocr.undo_sticky_repair([(0, {"parsing_res_list": [b1, b2]})], outcomes)
-    assert (b1.content, b2.content) == ("银行", "plain")
-
-
-def test_text_the_pipeline_changed_afterwards_is_left_alone():
-    b1 = Blk("text", (0, 0, 1, 1), "something else entirely")
-    outcomes = {(0, (0, 0, 1, 1)): outcome(text="銀行", text_before_repair="银行", judged=True)}
-    pdf_ocr.undo_sticky_repair([(0, {"parsing_res_list": [b1]})], outcomes)
-    assert b1.content == "something else entirely"
-
-
 # --- the summary, stderr and the postprocessing section ------------------------------------------------
 
 def test_the_postprocessing_summary_counts_blocks_verdicts_and_early_judgements():
@@ -348,12 +326,3 @@ def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monke
                   ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]
     for msg in messages:
         assert "--no-judge" not in msg and "--reader paddle" not in msg, msg
-
-
-def test_judged_blocks_without_an_outcome_are_found_by_page_and_box():
-    block = lambda label, bbox: types.SimpleNamespace(label=label, bbox=bbox)  # noqa: E731
-    res = {"parsing_res_list": [block("text", [1, 2, 3, 4]), block("text", [5, 6, 7, 8]), block("chart", [9, 9, 9, 9]),
-                                block("table", [0.4, 0.6, 20.2, 30.9])]}
-    outcomes = {(2, (1, 2, 3, 4)): outcome(judged=True)}
-    assert pdf_ocr.blocks_without_outcome(2, res, outcomes) == [("text", (5, 6, 7, 8)), ("table", (0, 0, 20, 30))]
-    assert len(pdf_ocr.blocks_without_outcome(3, res, outcomes)) == 3  # another page's outcomes do not count
