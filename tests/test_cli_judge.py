@@ -129,22 +129,22 @@ def page(blocks, outcomes, raw=None, idx=0):
 
 
 def test_a_judged_block_carries_score_verdict_and_flag():
-    o = outcome(judged=True, score=0.91, verdict="scored", below_threshold=True)
+    o = outcome(judged=True, score=0.91, verdict="scored", flagged=True)
     (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
-    assert (b["score"], b["verdict"], b["below_threshold"]) == (0.91, "scored", True)
+    assert (b["score"], b["verdict"], b["flagged"]) == (0.91, "scored", True)
 
 
 def test_a_block_the_judge_could_not_score_has_a_null_score_and_the_reason():
-    o = outcome(judged=True, score=None, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
+    o = outcome(judged=True, score=None, verdict="render_error", verdict_detail="render_failed", flagged=True)
     (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
-    assert b["score"] is None and b["verdict"] == "render_error" and b["below_threshold"] is True
+    assert b["score"] is None and b["verdict"] == "render_error" and b["flagged"] is True
     assert b["verdict_detail"] == "render_failed"
 
 
 def test_charts_seals_and_figures_have_none_of_the_judge_fields():
     o = outcome(judged=False)
     (b,) = page([block(block_label="chart")], {(0, (1, 2, 30, 40)): o})["blocks"]
-    assert not {"score", "verdict", "below_threshold", "verdict_detail"} & b.keys()
+    assert not {"score", "verdict", "flagged", "verdict_detail"} & b.keys()
 
 
 def test_without_outcomes_the_json_is_what_it_was_before_the_judge():
@@ -153,19 +153,19 @@ def test_without_outcomes_the_json_is_what_it_was_before_the_judge():
 
 
 def test_outcomes_are_matched_by_page_and_bbox_not_by_block_id():
-    o = outcome(judged=True, score=0.5, verdict="scored", below_threshold=True)
+    o = outcome(judged=True, score=0.5, verdict="scored", flagged=True)
     assert "score" in page([block(block_id=7)], {(3, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
     assert "score" not in page([block(block_id=7)], {(2, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
 
 
 def test_a_block_judged_before_the_document_was_known_to_be_traditional_is_marked():
-    o = outcome(judged=True, score=0.9, verdict="scored", below_threshold=True, judged_before_script_decision=True)
+    o = outcome(judged=True, score=0.9, verdict="scored", flagged=True, judged_before_script_decision=True)
     (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
     assert b["judged_before_script_decision"] is True
 
 
 def test_the_text_that_was_judged_is_recorded_when_it_differs_from_the_text_that_was_written():
-    o = outcome(text="银行", judged=True, score=0.9, verdict="scored", below_threshold=True)
+    o = outcome(text="银行", judged=True, score=0.9, verdict="scored", flagged=True)
     (b,) = page([block(block_content="銀行")], {(0, (1, 2, 30, 40)): o})["blocks"]
     assert b["judged_text"] == "银行"
     (b,) = page([block(block_content="银行")], {(0, (1, 2, 30, 40)): o})["blocks"]
@@ -204,38 +204,38 @@ def test_text_the_pipeline_changed_afterwards_is_left_alone():
 
 def test_the_postprocessing_summary_counts_blocks_verdicts_and_early_judgements():
     outcomes = {
-        (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False),
-        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.5, verdict="scored", below_threshold=True, judged_before_script_decision=True),
-        (1, (0, 0, 1, 1)): outcome(judged=True, verdict="render_error", below_threshold=True),
+        (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", flagged=False),
+        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.5, verdict="scored", flagged=True, judged_before_script_decision=True),
+        (1, (0, 0, 1, 1)): outcome(judged=True, verdict="render_error", flagged=True),
         (1, (0, 5, 1, 6)): outcome(judged=False),
     }
     assert pdf_ocr.judge_summary(outcomes) == {
-        "blocks_judged": 3, "blocks_reread": 0, "blocks_below_threshold": 2, "reread_stop_reasons": {},
+        "blocks_judged": 3, "blocks_reread": 0, "blocks_flagged": 2, "reread_stop_reasons": {},
         "readings_beyond_the_first": 0,
         "verdicts": {"render_error": 1, "scored": 2}, "blocks_judged_before_script_decision": 1}
 
 
-def test_the_postprocessing_summary_reports_re_read_blocks_and_those_still_below_the_threshold():
+def test_the_postprocessing_summary_reports_re_read_blocks_and_flagged_blocks():
     r = lambda text, rnd, score, dup=0: Reading(text, rnd, "greedy", None, 1.0, verdict="scored", score=score, duplicates=dup)
     outcomes = {
-        (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False),     # passed at once
-        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", below_threshold=False,
+        (0, (0, 0, 1, 1)): outcome(judged=True, score=0.99, verdict="scored", flagged=False),     # passed at once
+        (0, (0, 2, 1, 3)): outcome(judged=True, score=0.99, verdict="scored", flagged=True,
                                    readings=[r("a", 1, 0.5), r("b", 2, 0.99)], stop_reason="passed"),
-        (1, (0, 0, 1, 1)): outcome(judged=True, score=0.7, verdict="scored", below_threshold=True, stop_reason="exhausted",
+        (1, (0, 0, 1, 1)): outcome(judged=True, score=0.7, verdict="scored", flagged=True, stop_reason="exhausted",
                                    readings=[r("a", 1, 0.5, dup=2), r("b", 3, 0.7)]),
     }
     summary = pdf_ocr.judge_summary(outcomes)
-    assert (summary["blocks_judged"], summary["blocks_reread"], summary["blocks_below_threshold"]) == (3, 2, 1)
+    assert (summary["blocks_judged"], summary["blocks_reread"], summary["blocks_flagged"]) == (3, 2, 2)
     assert summary["reread_stop_reasons"] == {"exhausted": 1, "passed": 1}
     assert summary["readings_beyond_the_first"] == 1 + 3
 
 
-def test_the_page_line_on_stderr_reports_blocks_below_the_threshold_and_blocks_re_read():
-    line = pdf_ocr.page_line(2, 21, 4, 13, 7.04, summary={"judged": 9, "reread": 5, "below_threshold": 3, "not_scored": 1}, recovered=0)
-    assert line == "[  2/21] page 4: 13 blocks, 7.0s, 3 of 9 judged below the threshold, 5 re-read (1 not scored)"
+def test_the_page_line_on_stderr_reports_flagged_blocks_and_blocks_re_read():
+    line = pdf_ocr.page_line(2, 21, 4, 13, 7.04, summary={"judged": 9, "reread": 5, "flagged": 3, "not_scored": 1}, recovered=0)
+    assert line == "[  2/21] page 4: 13 blocks, 7.0s, 3 of 9 judged flagged, 5 re-read (1 not scored)"
     plain = pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary=None, recovered=2)
     assert plain == "[  1/2] page 1: 5 blocks, 1.0s, re-read 2 short block(s)"
-    assert "0 re-read" in pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary={"judged": 5, "reread": 0, "below_threshold": 0, "not_scored": 0}, recovered=0)
+    assert "0 re-read" in pdf_ocr.page_line(1, 2, 1, 5, 1.0, summary={"judged": 5, "reread": 0, "flagged": 0, "not_scored": 0}, recovered=0)
 
 
 # --- a re-read Block in the JSON ----------------------------------------------------------------------------
@@ -244,7 +244,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
     readings = [Reading("你好", 1, "greedy", None, 1.0, verdict="scored", score=0.4, duplicates=1),
                 Reading("你號", 3, "temperature", 0.3, 1.0, verdict="scored", score=0.93),
                 Reading("x", 2, "greedy", None, 1.25, "page_render", "render_error", None, "render_failed")]
-    o = outcome(text="你號", judged=True, score=0.93, verdict="scored", below_threshold=True, readings=readings,
+    o = outcome(text="你號", judged=True, score=0.93, verdict="scored", flagged=True, readings=readings,
                 stop_reason="exhausted", skipped_rounds=[{"round": 2, "reason": "r"}])
     (b,) = page([block(block_content="你號")], {(0, (1, 2, 30, 40)): o})["blocks"]
     assert (b["content"], b["score"], b["stop_reason"]) == ("你號", 0.93, "exhausted")
@@ -259,7 +259,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
 
 
 def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rounds():
-    o = outcome(judged=True, score=0.99, verdict="scored", below_threshold=False)
+    o = outcome(judged=True, score=0.99, verdict="scored", flagged=False)
     (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
     assert not {"readings", "stop_reason", "stop_detail", "skipped_rounds"} & b.keys()
 
@@ -295,18 +295,18 @@ def test_the_memory_hint_names_the_ways_out_of_the_configuration_that_ran(argv, 
 
 
 def test_a_verdict_detail_about_memory_gives_the_hint_too():
-    oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", below_threshold=True)
+    oom = outcome(judged=True, verdict="forward_error", verdict_detail="OutOfMemoryError: CUDA out of memory", flagged=True)
     assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_a_re_read_that_ran_out_of_memory_also_gives_the_hint():
-    oom = outcome(judged=True, verdict="scored", score=0.5, below_threshold=True, readings=[], stop_reason="reader_error",
+    oom = outcome(judged=True, verdict="scored", score=0.5, flagged=True, readings=[], stop_reason="reader_error",
                   stop_detail="round 3: worker error: OutOfMemoryError: CUDA out of memory")
     assert "GPU" in pdf_ocr.memory_hint(args("--judge"), {}, {(0, (0, 0, 1, 1)): oom})
 
 
 def test_other_failures_give_no_memory_hint():
-    other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", below_threshold=True)
+    other = outcome(judged=True, verdict="render_error", verdict_detail="render_failed", flagged=True)
     assert pdf_ocr.memory_hint(args("--judge"), {1: "ValueError: bad page"}, {(0, (0, 0, 1, 1)): other}) is None
     assert pdf_ocr.memory_hint(args(), {}, {}) is None
 
