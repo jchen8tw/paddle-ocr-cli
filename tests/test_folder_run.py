@@ -1,5 +1,5 @@
-"""A folder Run on the GPU, with the real models, the default Reader (MiniCPM-OCR-1.0) and the Judge at the
-threshold 0.98 (so that most Blocks go through the seeded sampling Rounds): its Documents come out as if each had
+"""A folder Run on the GPU, with the real models, `--reader minicpm` and the Judge (`--judge`) at the threshold
+0.98 (so that most Blocks go through the seeded sampling Rounds): its Documents come out as if each had
 been a Run of its own. Needs the models, the worker environment, the Judge's setup and PDF_OCR_SAMPLE_PDF (see conftest.py).
 
 The folder holds two 2-page PDFs cut from the sample (one of them in a subfolder) and a corrupt PDF between them.
@@ -41,7 +41,7 @@ def run_cli(target: Path, out: Path, models: Path, *extra: str) -> Run:
     started = time.time()
     done = subprocess.run(
         [sys.executable, str(ROOT / "pdf_ocr.py"), str(target), "-o", str(out), "--models-dir", str(models),
-         "--judge-threshold", JUDGE_THRESHOLD, *extra],
+         "--reader", "minicpm", "--judge", "--judge-threshold", JUDGE_THRESHOLD, *extra],
         capture_output=True, text=True, cwd=ROOT)
     return Run(done.returncode, done.stderr, time.time() - started)
 

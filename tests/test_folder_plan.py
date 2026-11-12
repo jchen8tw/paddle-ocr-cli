@@ -24,7 +24,7 @@ def tree(base: Path, *names: str) -> Path:
 
 
 def plan(folder, output_root=None, *argv):
-    args = pdf_ocr.build_parser().parse_args([str(folder), *argv])
+    args = pdf_ocr.parse_args([str(folder), *argv])
     return pdf_ocr.plan_run(Path(folder), output_root, args)
 
 
@@ -184,7 +184,7 @@ def test_a_folder_that_cannot_be_read_is_refused_instead_of_being_skipped_silent
 def test_planning_needs_no_paddle(tmp_path):
     folder = tree(tmp_path / "docs", "a.pdf", "sub/b.pdf")
     code = ("import sys, pdf_ocr; from pathlib import Path\n"
-            "args = pdf_ocr.build_parser().parse_args(sys.argv[1:2])\n"
+            "args = pdf_ocr.parse_args(sys.argv[1:2])\n"
             "assert len(pdf_ocr.plan_run(Path(sys.argv[1]), None, args)) == 2\n"
             "assert 'paddle' not in sys.modules and 'torch' not in sys.modules")
     done = subprocess.run([sys.executable, "-c", code, str(folder)], cwd=ROOT, capture_output=True, text=True,

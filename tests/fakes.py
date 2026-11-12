@@ -109,6 +109,9 @@ class FakePipe:
         return results
 
 
+ENGINE_ARGV = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # the options `engine_with` stands for
+
+
 def engine_with(tmp_path):
     """A loaded Engine (what `load_engine` returns) whose worker answers from `client.texts`."""
     client = FakeClient(default_score=0.5)  # every Reading scores below the threshold: all re-read Rounds run

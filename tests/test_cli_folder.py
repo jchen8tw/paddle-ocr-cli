@@ -7,7 +7,7 @@ import time
 import pytest
 
 import pdf_ocr
-from fakes import blank_pdf, engine_with
+from fakes import ENGINE_ARGV, blank_pdf, engine_with
 
 
 def run_refused(argv, capsys):
@@ -95,7 +95,7 @@ def read_json(path):
 def test_a_folder_run_writes_each_document_to_its_mirrored_folder_and_exits_0(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "b.pdf", "sub/deeper/a.PDF")
     out = tmp_path / "out"
-    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 0
+    assert pdf_ocr.main([str(folder), "-o", str(out), *ENGINE_ARGV]) == 0
     assert (out / "b" / "b.md").is_file() and (out / "sub" / "deeper" / "a" / "a.md").is_file()
     doc = read_json(out / "sub" / "deeper" / "a" / "a.json")
     assert doc["source"]["file"] == "a.PDF"  # the bare file name, as in a single-PDF Run
@@ -109,7 +109,7 @@ def test_a_folder_run_writes_each_document_to_its_mirrored_folder_and_exits_0(tm
 def test_the_default_output_root_is_output_slash_the_folders_name(tmp_path, monkeypatch, loaded):
     folder = folder_of(tmp_path, "a.pdf")
     monkeypatch.chdir(tmp_path)
-    assert pdf_ocr.main([str(folder)]) == 0
+    assert pdf_ocr.main([str(folder), *ENGINE_ARGV]) == 0
     assert (tmp_path / "output" / "docs" / "a" / "a.json").is_file()
 
 
@@ -120,7 +120,7 @@ def test_the_stderr_of_a_folder_run_has_a_header_per_document_and_a_summary_with
     (folder / "gone.pdf").symlink_to(tmp_path / "nowhere.pdf")
     (folder / ".hidden.pdf").write_bytes(b"not a pdf either")
     out = tmp_path / "out"
-    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(out), *ENGINE_ARGV]) == 1
     lines = capsys.readouterr().err.splitlines()
     assert lines[0] == f"found 4 Documents in {folder} (0 already done)"
     assert lines[1] == "[1/4] a.pdf (2 pages)"
@@ -139,7 +139,7 @@ def test_a_failed_page_is_a_failed_document_run_exit_1_but_its_output_is_written
     folder = folder_of(tmp_path, "a.pdf", "b.pdf")
     loaded.client.fail_on = "Text Recognition:"  # the worker dies on every read: every page fails
     out = tmp_path / "out"
-    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(out), *ENGINE_ARGV]) == 1
     assert read_json(out / "a" / "a.json")["source"]["pages_failed"] == [1]
     assert read_json(out / "b" / "b.json")["source"]["pages_failed"] == [1]
     lines = capsys.readouterr().err.splitlines()
@@ -158,7 +158,7 @@ def test_a_document_that_raises_is_reported_and_the_run_continues(tmp_path, caps
 
     monkeypatch.setattr(pdf_ocr, "transcribe_document", flaky)
     out = tmp_path / "out"
-    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(out), *ENGINE_ARGV]) == 1
     assert (out / "a" / "a.json").is_file() and (out / "c" / "c.json").is_file() and not (out / "boom").exists()
     err = capsys.readouterr().err
     assert "3 Documents: 2 written, 0 skipped, 1 failed\n  boom.pdf: RuntimeError: the disk is full\n" in err
@@ -168,7 +168,7 @@ def test_a_document_that_raises_is_reported_and_the_run_continues(tmp_path, caps
 def test_a_pdf_that_cannot_be_read_is_reported_and_the_run_continues(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "a.pdf", "locked.pdf", "z.pdf")
     (folder / "locked.pdf").chmod(0o000)
-    assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]) == 1
     assert "  locked.pdf: cannot open " in capsys.readouterr().err
     assert (tmp_path / "out" / "z" / "z.json").is_file() and not (tmp_path / "out" / "locked").exists()
 
@@ -188,7 +188,7 @@ def test_force_with_a_single_pdf_is_a_usage_error_before_anything_else(tmp_path,
 
 def test_a_single_pdf_is_never_skipped(tmp_path, loaded):
     pdf = blank_pdf(tmp_path / "a.pdf")
-    argv = [str(pdf), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(pdf), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0 and pdf_ocr.main(argv) == 0
     assert (loaded.checks, loaded.loads) == (2, 2)
 
@@ -196,7 +196,7 @@ def test_a_single_pdf_is_never_skipped(tmp_path, loaded):
 def test_a_folder_whose_documents_are_all_done_exits_0_without_the_setup_checks_or_a_model(
         tmp_path, capsys, loaded, monkeypatch):
     folder = folder_of(tmp_path, "b.pdf", "sub/a.PDF")
-    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0
     before = snapshot(tmp_path / "out")
     capsys.readouterr()
@@ -214,7 +214,7 @@ def test_a_folder_whose_documents_are_all_done_exits_0_without_the_setup_checks_
 def test_a_second_run_processes_only_what_is_new_and_numbers_it_by_its_place_in_the_whole_run(
         tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "b.pdf", "d.pdf")
-    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0
     before = snapshot(tmp_path / "out")
     blank_pdf(folder / "a.pdf"), blank_pdf(folder / "sub.pdf")  # a new one before the done ones, one after
@@ -235,7 +235,7 @@ def test_a_second_run_processes_only_what_is_new_and_numbers_it_by_its_place_in_
 def test_a_document_that_failed_before_is_retried_and_a_skipped_one_never_makes_the_exit_code_1(
         tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "a.pdf", "z.pdf")
-    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     loaded.client.fail_on = "Text Recognition:"  # every page fails: both Documents are written with failed pages
     assert pdf_ocr.main(argv) == 1
     loaded.client.fail_on = None
@@ -252,7 +252,7 @@ def test_a_document_that_failed_before_is_retried_and_a_skipped_one_never_makes_
 
 def test_force_redoes_every_document(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "a.pdf", "sub/b.pdf")
-    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0
     first = snapshot(tmp_path / "out")
     capsys.readouterr()
@@ -267,7 +267,7 @@ def test_force_redoes_every_document(tmp_path, capsys, loaded):
 
 def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "a.pdf")
-    argv = [str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0
     capsys.readouterr()
     assert pdf_ocr.main([*argv, "--no-page-markers"]) == 0
@@ -283,7 +283,7 @@ def test_a_worker_crash_on_the_last_page_of_a_document_fails_only_that_page_and_
     blank_pdf(folder / "b.pdf")
     loaded.client.crash_on_page = 2  # the last page of a.pdf loses its worker on its first read
     out = tmp_path / "out"
-    assert pdf_ocr.main([str(folder), "-o", str(out), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(out), *ENGINE_ARGV]) == 1
     a, b = read_json(out / "a" / "a.json"), read_json(out / "b" / "b.json")
     assert a["source"]["pages_failed"] == [2]
     first, crashed = a["pages"]
@@ -296,7 +296,7 @@ def test_a_worker_crash_on_the_last_page_of_a_document_fails_only_that_page_and_
                           "  a.pdf: page 2 failed (recorded in its JSON)"]
 
     Loaded(monkeypatch, tmp_path / "alone")  # nothing of the crash reached b.pdf: it equals a Run on b.pdf alone
-    assert pdf_ocr.main([str(folder / "b.pdf"), "-o", str(tmp_path / "alone-out"), "--judge-threshold", "0.98"]) == 0
+    assert pdf_ocr.main([str(folder / "b.pdf"), "-o", str(tmp_path / "alone-out"), *ENGINE_ARGV]) == 0
     alone = read_json(tmp_path / "alone-out" / "b.json")
     for doc in (b, alone):
         del doc["elapsed_seconds"]
@@ -308,7 +308,7 @@ def test_a_worker_crash_on_the_last_page_of_a_document_fails_only_that_page_and_
 
 def test_an_output_root_inside_the_folder_is_never_picked_up_as_input_by_the_next_run(tmp_path, capsys, loaded):
     folder = folder_of(tmp_path, "b.pdf", "sub/a.pdf")
-    argv = [str(folder), "-o", str(folder / "out"), "--judge-threshold", "0.98"]
+    argv = [str(folder), "-o", str(folder / "out"), *ENGINE_ARGV]
     assert pdf_ocr.main(argv) == 0
     assert (folder / "out" / "sub" / "a" / "a.json").is_file()  # the output is inside the folder
     before = snapshot(folder / "out")
@@ -326,10 +326,10 @@ def test_the_default_output_root_when_the_folder_is_the_working_directory_is_nev
         tmp_path, capsys, monkeypatch, loaded):
     folder = folder_of(tmp_path, "b.pdf", "sub/a.pdf")
     monkeypatch.chdir(folder)
-    assert pdf_ocr.main([".", "--judge-threshold", "0.98"]) == 0
+    assert pdf_ocr.main([".", *ENGINE_ARGV]) == 0
     assert (folder / "output" / "docs" / "sub" / "a" / "a.json").is_file()  # output/<name of the current directory>/
     capsys.readouterr()
-    assert pdf_ocr.main([".", "--judge-threshold", "0.98"]) == 0
+    assert pdf_ocr.main([".", *ENGINE_ARGV]) == 0
     lines = capsys.readouterr().err.splitlines()
     assert lines[0] == "found 2 Documents in . (2 already done)"
     assert lines[-1] == "2 Documents: 0 written, 2 skipped, 0 failed"
@@ -353,7 +353,7 @@ def opened(monkeypatch):
 
 def test_a_single_pdf_run_closes_its_pdf(tmp_path, loaded, opened):
     pdf = blank_pdf(tmp_path / "a.pdf")
-    assert pdf_ocr.main([str(pdf), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 0
+    assert pdf_ocr.main([str(pdf), "-o", str(tmp_path / "out"), *ENGINE_ARGV]) == 0
     assert len(opened) == 1 and opened[0].pdf.raw is None
 
 
@@ -367,5 +367,5 @@ def test_a_folder_run_closes_every_pdf_also_of_a_document_that_raised(tmp_path, 
         return real(engine, args, document, out_dir, started)
 
     monkeypatch.setattr(pdf_ocr, "transcribe_document", flaky)
-    assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), "--judge-threshold", "0.98"]) == 1
+    assert pdf_ocr.main([str(folder), "-o", str(tmp_path / "out"), *ENGINE_ARGV]) == 1
     assert len(opened) == 2 and all(d.pdf.raw is None for d in opened)

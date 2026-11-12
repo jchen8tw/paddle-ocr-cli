@@ -9,17 +9,17 @@ from pathlib import Path
 import pytest
 
 import pdf_ocr
-from fakes import blank_pdf, engine_with
+from fakes import ENGINE_ARGV, blank_pdf, engine_with
 
-JUDGE = ["--judge-threshold", "0.98"]  # what the fake Engine runs with
-
-
-def options(folder, out, *argv):
-    return pdf_ocr.build_parser().parse_args([str(folder), "-o", str(out), *JUDGE, *argv])
+JUDGE_OFF = ["--reader", "minicpm", "--no-judge"]  # the fake Engine's Reader without the Judge: a threshold would be a usage error
 
 
-def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False):
-    """A folder of blank PDFs, and the output root that a Run of them with `argv` left behind."""
+def options(folder, out, *argv, base=ENGINE_ARGV):
+    return pdf_ocr.parse_args([str(folder), "-o", str(out), *base, *argv])
+
+
+def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False, base=ENGINE_ARGV):
+    """A folder of blank PDFs, and the output root that a Run of them with `base` and `argv` left behind."""
     folder, out = tmp_path / "docs", tmp_path / "out"
     for name in names:
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
@@ -27,7 +27,7 @@ def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False):
     engine, client = engine_with(tmp_path / "engine")
     if fail_pages:
         client.fail_on = "Text Recognition:"
-    args = options(folder, out, *argv)
+    args = options(folder, out, *argv, base=base)
     for rel in pdf_ocr.find_pdfs(folder):
         errors = pdf_ocr.transcribe_document(engine, args, pdf_ocr.open_document(folder / rel, None),
                                              out / rel.parent / rel.stem)
@@ -35,8 +35,8 @@ def written(tmp_path, names=("a.pdf", "sub/b.pdf"), *argv, fail_pages=False):
     return folder, out
 
 
-def plan(folder, out, *argv):
-    return {d.relative.as_posix(): d for d in pdf_ocr.plan_run(folder, out, options(folder, out, *argv))}
+def plan(folder, out, *argv, base=ENGINE_ARGV):
+    return {d.relative.as_posix(): d for d in pdf_ocr.plan_run(folder, out, options(folder, out, *argv, base=base))}
 
 
 def json_of(out, name="a"):
@@ -83,7 +83,6 @@ def test_a_document_with_failed_pages_is_not_done(tmp_path):
     (["--script", "off"], "script"),
     (["--no-page-markers"], "page_markers"),
     (["--judge-threshold", "0.9"], "judge_threshold"),
-    (["--no-judge"], "judge"),
     (["--reader", "paddle"], "reader"),
     (["--dpi", "150"], "dpi"),
     (["--layout-threshold", "0.3"], "layout_threshold"),
@@ -98,6 +97,13 @@ def test_a_document_written_with_another_setting_is_not_done(tmp_path, changed, 
     plan_ = plan(folder, out, *changed)
     assert [d.done for d in plan_.values()] == [False, False]
     assert key in plan_["a.pdf"].reason and "settings" in plan_["a.pdf"].reason
+
+
+def test_a_document_written_with_the_judge_is_not_done_by_a_run_without_it(tmp_path):
+    folder, out = written(tmp_path)
+    plan_ = plan(folder, out, base=JUDGE_OFF)
+    assert [d.done for d in plan_.values()] == [False, False]
+    assert "judge" in plan_["a.pdf"].reason and "settings" in plan_["a.pdf"].reason
 
 
 def test_options_that_do_not_shape_the_output_leave_the_documents_done(tmp_path):
@@ -122,9 +128,9 @@ def test_a_judge_that_was_not_recorded_while_this_run_uses_it_is_not_done(tmp_pa
 
 
 def test_a_judge_that_was_recorded_while_this_run_has_none_is_not_done(tmp_path):
-    folder, out = written(tmp_path, ("a.pdf",), "--no-judge")
+    folder, out = written(tmp_path, ("a.pdf",), base=JUDGE_OFF)
     edit(json_of(out), lambda doc: doc["engine"].update(judge="MiniCPM-OCR-Jev"))
-    assert not plan(folder, out, "--no-judge")["a.pdf"].done
+    assert not plan(folder, out, base=JUDGE_OFF)["a.pdf"].done
 
 
 def test_other_library_versions_and_another_device_leave_a_document_done(tmp_path):

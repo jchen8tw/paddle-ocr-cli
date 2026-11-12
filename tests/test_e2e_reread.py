@@ -1,5 +1,5 @@
-"""End-to-end re-reading (slow; GPU + models + PDF needed): a threshold of 0.9999 forces Blocks through the
-re-read schedule, with either Reader (see conftest.py: PDF_OCR_REREAD_PAGES)."""
+"""End-to-end re-reading (slow; GPU + models + PDF needed): --judge with a threshold of 0.9999 forces Blocks through
+the re-read schedule, with either Reader (see conftest.py: PDF_OCR_REREAD_PAGES)."""
 import json
 
 import pytest

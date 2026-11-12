@@ -1,5 +1,5 @@
 """The Block-level clean-up after the pipeline has read every page (pdf_ocr): the lone symbols that a run without a
-bridge (--reader paddle --no-judge) only gets here, and the document-level script repair, which writes `≥`/`≤` as the
+bridge (PaddleOCR-VL without --judge, the default) only gets here, and the document-level script repair, which writes `≥`/`≤` as the
 Big5 glyphs `≧`/`≦` in a Traditional document (no GPU, no models)."""
 import types
 

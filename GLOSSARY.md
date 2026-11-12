@@ -1,7 +1,7 @@
 # pdf_ocr
 
 Turns a PDF into Markdown, JSON and CSV with local models only: a layout model finds the regions of
-each page, a reader transcribes each region, and a judge rates how trustworthy each transcription is.
+each page, a reader transcribes each region, and, if asked, a judge rates how trustworthy each transcription is.
 
 ## Language
 
@@ -19,8 +19,8 @@ _Avoid_: region, box, element
 ### Reading and judging
 
 **Reader**:
-A model that turns one Block into text, HTML or LaTeX. MiniCPM-OCR is the default Reader;
-PaddleOCR-VL is the alternative.
+A model that turns one Block into text, HTML or LaTeX. PaddleOCR-VL is the default Reader;
+MiniCPM-OCR is the alternative (`--reader minicpm`).
 _Avoid_: recognizer, OCR model, engine
 
 **Reading**:

@@ -9,7 +9,7 @@ import types
 import numpy as np
 
 import pdf_ocr
-from fakes import blank_pdf, engine_with
+from fakes import ENGINE_ARGV, blank_pdf, engine_with
 from reader_bridge import BlockQuery
 
 TRAD = "國際學習體驗電腦關係開發設計價值義務織組條約證據隨時變數與認為對應條款歷計劃書據點"
@@ -17,7 +17,7 @@ LOOP = "前言" + "ABCDEFGHIJ" * 20  # a repetition loop, cut back to "前言" a
 
 
 def transcribe(engine, pdf, out):
-    args = pdf_ocr.build_parser().parse_args([str(pdf), "--no-csv", "--judge-threshold", "0.98"])
+    args = pdf_ocr.parse_args([str(pdf), "--no-csv", *ENGINE_ARGV])
     assert pdf_ocr.transcribe_document(engine, args, pdf_ocr.open_document(pdf, None), out) == {}
     doc = json.loads((out / f"{pdf.stem}.json").read_text(encoding="utf-8"))
     del doc["elapsed_seconds"]

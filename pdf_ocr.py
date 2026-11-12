@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Transcribe a PDF to Markdown and JSON with MiniCPM-OCR-1.0 (or PaddleOCR-VL-1.6), using the local models in ./models.
+"""Transcribe a PDF to Markdown and JSON with PaddleOCR-VL-1.6 (or MiniCPM-OCR-1.0), using the local models in ./models.
 
-    python pdf_ocr.py input.pdf                  # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
+    python pdf_ocr.py input.pdf                   # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
     python pdf_ocr.py input.pdf -o out --pages 1-5,9
-    python pdf_ocr.py scans/                     # every PDF under scans/ -> output/scans/<sub>/<name>/ (one model load)
-    python pdf_ocr.py scans/                     # again: the Documents already done are skipped (--force redoes them)
-    python pdf_ocr.py input.pdf --reader paddle  # PaddleOCR-VL-1.6 instead of MiniCPM-OCR-1.0
+    python pdf_ocr.py scans/                      # every PDF under scans/ -> output/scans/<sub>/<name>/ (one model load)
+    python pdf_ocr.py scans/                      # again: the Documents already done are skipped (--force redoes them)
+    python pdf_ocr.py input.pdf --reader minicpm  # MiniCPM-OCR-1.0 (in the torch worker) instead of PaddleOCR-VL-1.6
+    python pdf_ocr.py input.pdf --judge           # score every Reading with the Judge, re-read the low ones
 
 Pipeline: pypdfium2 renders each page -> PP-DocLayoutV3 finds and orders layout blocks -> the Reader
-(MiniCPM-OCR-1.0 in the torch worker, or PaddleOCR-VL-1.6) recognises every block (text / table /
+(PaddleOCR-VL-1.6, or MiniCPM-OCR-1.0 in the torch worker) recognises every block (text / table /
 formula; charts and seals on request) -> block-level clean-up (lone LaTeX symbols, Simplified/Traditional
 repair, truncated-block re-read) -> JSON per page, and Markdown with cross-page tables merged and title
 levels fixed, plus one CSV per well-formed table.
@@ -41,7 +42,7 @@ LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
 VL_MODEL_DIR = "PaddleOCR-VL-1.6"
 MINICPM_MODEL_DIR = "MiniCPM-OCR-1.0"
 JUDGE_MODEL_DIR = "MiniCPM-OCR-Jev"
-READER_MODEL_DIRS = {"minicpm": MINICPM_MODEL_DIR, "paddle": VL_MODEL_DIR}
+READER_MODEL_DIRS = {"paddle": VL_MODEL_DIR, "minicpm": MINICPM_MODEL_DIR}
 WORKER_DIR = ROOT / "worker"  # second uv project: torch + transformers (docs/adr/0001)
 
 # Page furniture that is kept in the JSON but left out of the Markdown by default.
@@ -66,10 +67,10 @@ def unit_interval(text: str) -> float:
     return value
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pdf_ocr",
-        description="Transcribe a PDF to Markdown + JSON with MiniCPM-OCR-1.0 or PaddleOCR-VL-1.6 (local models).",
+        description="Transcribe a PDF to Markdown + JSON with PaddleOCR-VL-1.6 or MiniCPM-OCR-1.0 (local models).",
     )
     p.add_argument("pdf", type=Path, metavar="PDF_OR_FOLDER",
                    help="input PDF, or a folder: every PDF under it (any depth; names starting with '.' are "
@@ -78,16 +79,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="output directory (default: output/<pdf stem>; for a folder, output/<folder name>, with "
                         "one subfolder per Document mirroring its place in the folder)")
     p.add_argument("--models-dir", type=Path, default=ROOT / "models",
-                   help=f"folder holding {LAYOUT_MODEL_DIR}/ and the Reader's folder: {MINICPM_MODEL_DIR}/ or "
-                        f"{VL_MODEL_DIR}/ with --reader paddle (default: ./models)")
+                   help=f"folder holding {LAYOUT_MODEL_DIR}/ and the Reader's folder: {VL_MODEL_DIR}/, or "
+                        f"{MINICPM_MODEL_DIR}/ with --reader minicpm, plus {JUDGE_MODEL_DIR}/ with --judge "
+                        "(default: ./models)")
     p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all; not with a folder)")
     p.add_argument("--device", help="paddle device, e.g. gpu:0 or cpu (default: gpu:0 if available)")
 
     g = p.add_argument_group("accuracy")
-    g.add_argument("--reader", choices=("minicpm", "paddle"), default="minicpm",
-                   help="model that reads each block: minicpm = MiniCPM-OCR-1.0, run in the torch worker "
-                        "(needs the worker environment, see the README); paddle = PaddleOCR-VL-1.6 "
-                        "(default: %(default)s)")
+    g.add_argument("--reader", choices=tuple(READER_MODEL_DIRS), default="paddle",
+                   help="model that reads each block: paddle = PaddleOCR-VL-1.6; minicpm = MiniCPM-OCR-1.0, run in "
+                        "the torch worker (needs the worker environment, see the README) (default: %(default)s)")
     # Defaults below were tuned against the text layer of a 21-page Traditional Chinese PDF:
     # 216 vs 288 DPI were equivalent (216 is faster); layout threshold 0.3 -> 0.2 cut text lost to
     # missed layout blocks from ~85 to ~20 characters, while 0.1 starts producing false boxes.
@@ -105,19 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="read text on seals/stamps (off by default; otherwise saved as an image)")
     g.add_argument("--ocr-images", action="store_true", help="also OCR text inside figure/image blocks")
     g.add_argument("--no-merge-blocks", action="store_true", help="do not merge adjacent text blocks before OCR")
-    g.add_argument("--no-judge", action="store_true",
-                   help="do not score blocks with the MiniCPM-OCR Jev Judge (needs the worker environment, Chromium, "
-                        "node and Noto Sans CJK, see the README). Without it the JSON has no scores and the "
-                        "ink-based re-read of implausibly short blocks runs instead")
-    g.add_argument("--judge-threshold", type=unit_interval, default=DEFAULT_JUDGE_THRESHOLD, metavar="FLOAT",
-                   help="blocks whose first Reading scores below this are re-read (up to 10 Readings, stopping after "
-                        "a round that reads no new text; the best one is kept) and flagged in the JSON (flagged) and "
-                        "counted on stderr. A re-read never clears the flag; a block whose first Reading could not be "
-                        "scored is flagged too. 0 turns the re-reading off and keeps the Scores. The Judge authors' "
-                        "own value, 0.98, flags and re-reads most Blocks for no gain on the measured document; see "
-                        "the README (default: %(default)s)")
+    g.add_argument("--judge", action=argparse.BooleanOptionalAction, default=False,
+                   help="score every block with the MiniCPM-OCR Jev Judge and re-read those below --judge-threshold "
+                        "(needs the worker environment, Chromium, node and Noto Sans CJK, see the README). Off by "
+                        "default: the JSON has no scores and the ink-based re-read of implausibly short blocks runs "
+                        "instead")
+    g.add_argument("--judge-threshold", type=unit_interval, default=None, metavar="FLOAT",
+                   help="with --judge: blocks whose first Reading scores below this are re-read (up to 10 Readings, "
+                        "stopping after a round that reads no new text; the best one is kept) and flagged in the JSON "
+                        "(flagged) and counted on stderr. A re-read never clears the flag; a block whose first Reading "
+                        "could not be scored is flagged too. 0 turns the re-reading off and keeps the Scores. The "
+                        "Judge authors' own value, 0.98, flags and re-reads most Blocks for no gain on the measured "
+                        f"document; see the README (default: {DEFAULT_JUDGE_THRESHOLD})")
     g.add_argument("--no-recover", action="store_true",
-                   help="with --no-judge, do not re-read blocks whose text is implausibly short for the ink they "
+                   help="without --judge, do not re-read blocks whose text is implausibly short for the ink they "
                         "contain (with the Judge on, that re-read never runs)")
     g.add_argument("--script", choices=("auto", "off"), default="auto",
                    help="auto: if the document is Traditional Chinese, repair Simplified characters the "
@@ -140,6 +142,23 @@ def build_parser() -> argparse.ArgumentParser:
                         "Not with a single PDF, which is always transcribed")
     p.add_argument("-v", "--verbose", action="store_true", help="show PaddleOCR/PaddleX logs")
     return p
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line, with the Judge settled: `judge` is a bool, and `judge_threshold` is a float exactly when
+    `judge` is true (None otherwise)."""
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.judge_threshold is not None and not args.judge:
+        parser.error("--judge-threshold only applies when the Judge is on; add --judge")
+    if args.judge and args.judge_threshold is None:
+        args.judge_threshold = DEFAULT_JUDGE_THRESHOLD
+    folder_run = args.pdf.is_dir()
+    if folder_run and args.pages is not None:
+        parser.error("--pages cannot be used with a folder: Documents differ in length")
+    if not folder_run and args.force:
+        parser.error("--force only applies to a folder: a single PDF is always transcribed again")
+    return args
 
 
 def parse_pages(spec: str | None, total: int) -> list[int]:
@@ -226,7 +245,7 @@ def pick_device(requested: str | None) -> str:
 
 def required_model_dirs(args) -> list[str]:
     """The folders of --models-dir that the chosen options use (and nothing else)."""
-    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader], *([] if args.no_judge else [JUDGE_MODEL_DIR])]
+    return [LAYOUT_MODEL_DIR, READER_MODEL_DIRS[args.reader], *([JUDGE_MODEL_DIR] if args.judge else [])]
 
 
 def missing_models_message(args) -> str | None:
@@ -239,13 +258,16 @@ def missing_models_message(args) -> str | None:
             f"{READER_MODEL_DIRS[other]} instead of {READER_MODEL_DIRS[args.reader]}.")
 
 
+WORKER_FREE = "a run without --reader minicpm and --judge does not need it"
+
+
 def worker_env_path() -> Path:
     return Path(os.environ.get("PDF_OCR_WORKER_ENV") or WORKER_DIR / ".venv")
 
 
 def needs_worker(args) -> bool:
-    """The torch worker holds MiniCPM (--reader minicpm) and Jev (the Judge). --reader paddle --no-judge needs neither."""
-    return args.reader == "minicpm" or not args.no_judge
+    """The torch worker holds MiniCPM (--reader minicpm) and Jev (--judge)."""
+    return args.reader == "minicpm" or args.judge
 
 
 def worker_env_problem() -> str | None:
@@ -255,7 +277,7 @@ def worker_env_problem() -> str | None:
     if path.is_dir():
         return None
     return (f"the worker environment (MiniCPM-OCR-1.0 and the Judge) is not set up ({path} not found). "
-            "Create it once with:  uv sync --project worker   (--reader paddle --no-judge runs without it)")
+            f"Create it once with:  uv sync --project worker   ({WORKER_FREE})")
 
 
 def worker_environment() -> dict:
@@ -270,10 +292,11 @@ def worker_environment() -> dict:
 
 
 def worker_command(args, uv: str) -> list[str]:
-    """Only what the options use is loaded: --reader paddle leaves MiniCPM out, --no-judge leaves Jev out."""
+    """Only what the options use is loaded: MiniCPM only with --reader minicpm, Jev only with --judge. The worker's
+    own --no-reader and --no-judge flags are its private protocol, not the CLI's."""
     return [uv, "run", "--project", str(WORKER_DIR), "--no-sync",
             "python", str(WORKER_DIR / "serve.py"), "--models-dir", str(args.models_dir.resolve()),
-            *(["--no-reader"] if args.reader != "minicpm" else []), *(["--no-judge"] if args.no_judge else [])]
+            *(["--no-reader"] if args.reader != "minicpm" else []), *([] if args.judge else ["--no-judge"])]
 
 
 def start_worker(args):
@@ -282,8 +305,8 @@ def start_worker(args):
 
     uv = shutil.which("uv")
     if not uv:
-        sys.exit("error: `uv` is not on PATH; it starts the torch worker (MiniCPM-OCR-1.0, the Judge) "
-                 "(install uv, or use --reader paddle --no-judge)")
+        sys.exit("error: `uv` is not on PATH; it starts the torch worker for --reader minicpm and --judge "
+                 f"(install uv; {WORKER_FREE})")
     if problem := worker_env_problem():
         sys.exit(f"error: {problem}")
     client = WorkerClient(worker_command(args, uv), env=worker_environment())
@@ -302,7 +325,7 @@ def engine_models(args) -> dict:
     from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
     (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
     return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
-            **({} if args.no_judge else {"judge": JUDGE_MODEL_DIR})}
+            **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
 
 
 def engine_info(args, device: str, ready: dict | None) -> dict:
@@ -374,10 +397,10 @@ def attach_worker(args, pipe, stack, ink):
     try:
         reader_bridge.check_hook_support(pipe)
     except reader_bridge.HookUnsupported as e:
-        sys.exit(f"error: {e}")
+        sys.exit(f"error: {e} The hook is used by --reader minicpm and --judge; {WORKER_FREE}.")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
-    judge = not args.no_judge
+    judge = args.judge
     repair = None
     if judge and args.script == "auto":
         try:
@@ -393,7 +416,8 @@ def attach_worker(args, pipe, stack, ink):
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    common = dict(to_html=convert_otsl_to_html, judge=judge, judge_threshold=args.judge_threshold, repair=repair)
+    common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair,
+                  **({"judge_threshold": args.judge_threshold} if judge else {}))
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
             paddle_model, client, tmp_dir, before_read=client.park if judge else None,
@@ -487,7 +511,7 @@ def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
 def recover_short_blocks(pipe, page, res, img, scale: float, args) -> list[dict]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
     differently scaled renders and keep the result only if it is clearly longer and plausible.
-    (--reader paddle without the Judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
+    (PaddleOCR-VL without --judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
     notes: list[dict] = []
     renders = PageRenders(page, img, scale, args.dpi)
     for b in res["parsing_res_list"]:
@@ -549,7 +573,7 @@ class PageRenders:
 
 
 class InkReread:
-    """The ink-based re-read inside the bridge (--reader minicpm --no-judge): the bridge hands over each Reading;
+    """The ink-based re-read inside the bridge (--reader minicpm without --judge): the bridge hands over each Reading;
     the page it belongs to is set here before the pipeline runs. Re-reads go straight to the Reader."""
 
     def __init__(self):
@@ -592,7 +616,8 @@ def fix_table_line_breaks(results: list[tuple[int, object]]) -> int:
 def unwrap_block_symbols(results: list[tuple[int, object]]) -> int:
     """Write the lone LaTeX symbols of every Block as their character (minicpm_reader.unwrap_symbols); returns how
     many were written. Like fix_table_line_breaks, this is the clean-up step the pipeline's own post-processing
-    lacks: without a bridge (--reader paddle --no-judge) the Readings only get it here, re-reads included. A bridge
+    lacks: without a bridge (PaddleOCR-VL without --judge, the default) the Readings only get it here, re-reads
+    included. A bridge
     has already unwrapped its text, so with one this finds nothing."""
     written = 0
     for _, r in results:
@@ -736,14 +761,26 @@ def judge_summary(outcomes: dict) -> dict:
             "blocks_judged_before_script_decision": sum(1 for o in judged if o.judged_before_script_decision)}
 
 
-def memory_hint(errors: dict, outcomes: dict) -> str | None:
+# The peaks quoted below are from the README's "Readers compared" table (pages 38-58 of one document).
+MEMORY_WAYS_OUT = {
+    ("paddle", False): "close other GPU programs, or try --reader minicpm, which needs less GPU memory "
+                       "(5,408 against 9,657 MiB at the peak on the measured document; it runs in the worker "
+                       "environment)",
+    ("minicpm", False): "close other GPU programs (MiniCPM-OCR-1.0 without the Judge is the smallest configuration)",
+    ("minicpm", True): "the Judge and the Reader must fit side by side; close other GPU programs, or run without "
+                       "--judge",
+    ("paddle", True): "the Judge and the Reader must fit side by side, and PaddleOCR-VL with the Judge is the "
+                      "tightest combination; close other GPU programs, run without --judge, or use "
+                      "--reader minicpm --judge",
+}
+
+
+def memory_hint(args, errors: dict, outcomes: dict) -> str | None:
     """One line of advice if a page failed, or the Judge could not score a Block, because the GPU ran out of memory."""
     texts = [*errors.values(), *(f"{o.verdict_detail or ''} {o.stop_detail or ''}" for o in outcomes.values())]
     if not any("out of memory" in t.lower() for t in texts):
         return None
-    return ("hint: the GPU ran out of memory. The Judge and the Reader need to fit next to each other and to whatever "
-            "else uses the GPU; close other GPU programs, or run with --no-judge or --reader minicpm "
-            "(--reader paddle with the Judge is the tightest combination)")
+    return f"hint: the GPU ran out of memory: {MEMORY_WAYS_OUT[args.reader, args.judge]}"
 
 
 def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *, summary: dict | None,
@@ -772,10 +809,10 @@ def settings_info(args, bridge=None) -> dict:
     supports = reader_bridge.reader_supports(args.reader) if bridge is None else bridge.supports
     return {
         "reader": args.reader,
-        "judge": not args.no_judge,
-        "judge_threshold": None if args.no_judge else args.judge_threshold,
-        **({} if args.no_judge else {"reread_schedule": reread_schedule_info(supports),
-                                     "max_readings_per_block": block_reader.MAX_READINGS}),
+        "judge": args.judge,
+        "judge_threshold": args.judge_threshold,
+        **({"reread_schedule": reread_schedule_info(supports),
+            "max_readings_per_block": block_reader.MAX_READINGS} if args.judge else {}),
         "dpi": args.dpi,
         "layout_threshold": args.layout_threshold,
         "max_new_tokens": args.max_new_tokens,
@@ -783,7 +820,7 @@ def settings_info(args, bridge=None) -> dict:
         "seal_recognition": args.seals,
         "ocr_for_image_blocks": args.ocr_images,
         "merge_layout_blocks": not args.no_merge_blocks,
-        "reread_short_blocks": args.no_judge and not args.no_recover,  # the ink-based re-read; never with the Judge
+        "reread_short_blocks": not args.judge and not args.no_recover,  # the ink-based re-read; never with the Judge
         "markdown_merge_tables": not args.no_merge_tables,
         "markdown_ignore_labels": list(args.md_ignore_labels),
         "script": args.script,
@@ -1133,8 +1170,9 @@ def check_setup(args) -> None:
         sys.exit(f"error: {msg}")
     if needs_worker(args) and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
-    if not args.no_judge and (problems := judge_setup_problems()):
-        sys.exit("error: the Judge's renderer is not set up (or use --no-judge):\n  - " + "\n  - ".join(problems))
+    if args.judge and (problems := judge_setup_problems()):
+        sys.exit("error: --judge needs the Judge's renderer, which is not set up (or run without --judge):\n  - "
+                 + "\n  - ".join(problems))
 
 
 class Engine:
@@ -1194,18 +1232,18 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
                 ink.set_page(bridge.page_source)
             res = pipe.predict(img, max_new_tokens=args.max_new_tokens, use_queues=False)[0]
             recovered = []
-            if args.no_judge and not args.no_recover and not args.reader == "minicpm":
+            if not args.judge and not args.no_recover and args.reader == "paddle":
                 recovered = recover_short_blocks(pipe, page, res, img, scale, args)  # PaddleOCR-VL, as before
             n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
                                              if p == idx and o.text_before_reread is not None) if bridge else 0)
-            if bridge is not None and not args.no_judge:
+            if bridge is not None and args.judge:
                 for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
                     print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
                           "Reader hook, or its box changed after reading)", file=sys.stderr)
             ok.append((idx, res))
             meta[idx] = {"scale": scale, "recovered": recovered}
             print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
-                            summary=bridge.page_summary(idx) if bridge and not args.no_judge else None,
+                            summary=bridge.page_summary(idx) if bridge and args.judge else None,
                             recovered=n_reread), file=sys.stderr)
         except Exception as e:  # keep going; the failure is recorded in the JSON and the exit code
             errors[idx] = f"{type(e).__name__}: {e}"
@@ -1261,14 +1299,14 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
             "latex_symbols_unwrapped": unwrapped + (bridge.symbols_unwrapped if bridge else 0),
             "script_repair": script_info,
             **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
-               if bridge and not args.no_judge else {}),
+               if bridge and args.judge else {}),
         },
         "csv_tables": csv_info,
         "elapsed_seconds": round(time.time() - t_start, 1),
         "pages": [pages[i] for i in sorted(pages)],
     }
     json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    if hint := memory_hint(errors, outcomes):
+    if hint := memory_hint(args, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
@@ -1349,19 +1387,13 @@ def transcribe_folder(args) -> int:
 
 
 def main(argv=None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    folder_run = args.pdf.is_dir()
-    if folder_run and args.pages is not None:
-        parser.error("--pages cannot be used with a folder: Documents differ in length")
-    if not folder_run and args.force:
-        parser.error("--force only applies to a folder: a single PDF is always transcribed again")
+    args = parse_args(argv)
     # Skip model-hoster connectivity checks and quiet noisy third-party output before importing paddle.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     if not args.verbose:
         warnings.filterwarnings("ignore", message=".*ccache.*")
         warnings.filterwarnings("ignore", message=".*copy construct from a tensor.*")
-    return transcribe_folder(args) if folder_run else transcribe(args)
+    return transcribe_folder(args) if args.pdf.is_dir() else transcribe(args)
 
 
 if __name__ == "__main__":

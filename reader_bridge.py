@@ -62,8 +62,8 @@ def _inner(pipe):
     except AttributeError:
         raise HookUnsupported(
             f"the installed PaddleOCR ({_versions()}) has no `paddlex_pipeline._pipeline` on PaddleOCRVL; "
-            "the MiniCPM Reader hook was written for paddleocr 3.7 / paddlex 3.7 (pinned in uv.lock). "
-            "Use --reader paddle, or `uv sync` to restore the pinned versions.") from None
+            "the Reader hook was written for paddleocr 3.7 / paddlex 3.7 (pinned in uv.lock); "
+            "`uv sync` restores them.") from None
 
 
 def original_vl_model(pipe):
@@ -86,9 +86,9 @@ def check_hook_support(pipe) -> None:
             problems.append(f"`{COLLECT}` has signature {names}, expected {COLLECT_ARITY} parameters")
     if problems:
         raise HookUnsupported(
-            f"the installed PaddleX ({_versions()}) is not compatible with the MiniCPM Reader hook: "
-            + "; ".join(problems) + ". The hook was written for paddleocr 3.7 / paddlex 3.7 (pinned in uv.lock). "
-            "Use --reader paddle, or `uv sync` to restore the pinned versions.")
+            f"the installed PaddleX ({_versions()}) is not compatible with the Reader hook: "
+            + "; ".join(problems) + ". The hook was written for paddleocr 3.7 / paddlex 3.7 (pinned in uv.lock); "
+            "`uv sync` restores them.")
 
 
 def install_reader_hook(pipe, reader):
@@ -108,7 +108,7 @@ def install_reader_hook(pipe, reader):
             if len(entry) != ENTRY_LEN:
                 raise HookUnsupported(
                     f"the installed PaddleX ({_versions()}) builds VL entries of {len(entry)} fields, the hook "
-                    f"expects {ENTRY_LEN}; use --reader paddle, or `uv sync` to restore the pinned versions.")
+                    f"expects {ENTRY_LEN}; `uv sync` restores the pinned versions.")
             i, j, image, prompt, pixels, figures = entry
             q = BlockQuery(prompt)
             q.label = blocks_for_img[j]["label"]
