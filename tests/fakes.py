@@ -235,8 +235,8 @@ def engine_for(options, tmp_path, *, worker=None):
     ready = {"event": "ready", "reader": pdf_ocr.MINICPM_MODEL_DIR if spec.reader == "minicpm" else None,
              "judge": pdf_ocr.JUDGE_MODEL_DIR if spec.judge else None, "versions": {"torch": "0.0"}}
     pipe = FakePipe()
-    engine = pdf_ocr.WithTheWorker(spec, pipe, "cpu", client, ready, crops, paddle_model=paddle, to_html=lambda s: "")
-    pipe.bridge = engine.bridge
+    engine = pdf_ocr.WithTheWorker(spec, pipe, "cpu", client, ready, crops, paddle_model=paddle, to_html=lambda s: "",
+                                   reader_hook=lambda pipe, bridge: setattr(pipe, "bridge", bridge))
     return engine, Fakes(pipe, client, paddle)
 
 
