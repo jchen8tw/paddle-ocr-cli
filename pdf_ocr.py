@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import importlib.metadata
-import json
 import os
 import re
 import shutil
@@ -836,8 +834,8 @@ def page_markdown(idx: int, res, out_dir: Path, markers: bool) -> str:
     for rel, image in (md.get("markdown_images") or {}).items():
         if image is None:
             continue
-        new_rel = f"imgs/p{idx + 1:03d}_{Path(rel).name}"
-        (out_dir / "imgs").mkdir(exist_ok=True)
+        new_rel = f"{document_record.IMGS}/p{idx + 1:03d}_{Path(rel).name}"
+        (out_dir / document_record.IMGS).mkdir(exist_ok=True)
         image.save(out_dir / new_rel)
         text = text.replace(rel, new_rel)
     return (f"<!-- page {idx + 1} -->\n\n" if markers else "") + text.strip()
@@ -1075,11 +1073,6 @@ def refuse_collisions(documents: list[PlannedDocument]) -> None:
                         + "\n  ".join(problems))
 
 
-def file_sha256(path: Path) -> str:
-    with open(path, "rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
-
-
 def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
     """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
     with the folder it writes to and whether it is Already done (`document_record.why_not_done`, under one
@@ -1189,7 +1182,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     t_start = time.time() if started is None else started
     pdf, indices, total = document.pdf, document.indices, document.total
     out_dir.mkdir(parents=True, exist_ok=True)
-    doc_hash = file_sha256(document.path)  # also seeds the sampling of the re-reads
+    doc_hash = document_record.sha256(document.path)
     engine.begin_document(doc_hash)
     pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
 
@@ -1252,38 +1245,25 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
               "Markdown is written per page without merged tables or re-levelled titles", file=sys.stderr)
         restructured = ok
     md_parts = {idx: page_markdown(idx, r, out_dir, not args.no_page_markers) for idx, r in restructured}
-    csv_info = None if args.no_csv else export_csv_tables(restructured, pages, out_dir / "csv")
+    csv_info = None if args.no_csv else export_csv_tables(restructured, pages, out_dir / document_record.CSV)
     for idx, msg in errors.items():
         pages[idx] = {"page": idx + 1, "error": msg, "blocks": []}
         md_parts[idx] = f"<!-- page {idx + 1} failed: {msg} -->"
 
-    stem = document.path.stem
-    md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
+    md_path = document_record.markdown_path(document.path, out_dir)
     md_path.write_text("\n\n".join(md_parts[i] for i in sorted(md_parts)) + "\n", encoding="utf-8")
-    record = {
-        "source": {
-            "file": document.path.name,
-            "sha256": doc_hash,
-            "page_count": total,
-            "pages_processed": [i + 1 for i in indices],
-            "pages_failed": [i + 1 for i in sorted(errors)],
-        },
-        "engine": engine_info(args, device, engine.ready),
-        "settings": settings_info(args, bridge),
-        "postprocessing": {
-            "tables_with_line_breaks_fixed": tables_fixed,
-            **({"repetition_cuts": bridge.repetition_cuts} if bridge else {}),
-            "latex_symbols_unwrapped": unwrapped + (bridge.symbols_unwrapped if bridge else 0),
-            "script_repair": script_info,
-            **({"judge": {**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}}
-               if bridge and args.judge else {}),
-            **({"restructuring_failed": restructuring_failed} if restructuring_failed else {}),
-        },
-        "csv_tables": csv_info,
-        "elapsed_seconds": round(time.time() - t_start, 1),
-        "pages": [pages[i] for i in sorted(pages)],
-    }
-    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tally = document_record.EngineTally()
+    if bridge is not None:
+        judge = ({**judge_summary(outcomes), "scaled_images_by_source": dict(sorted(bridge.scale_sources.items()))}
+                 if args.judge else None)
+        tally = document_record.EngineTally(bridge.repetition_cuts, bridge.symbols_unwrapped, judge)
+    transcription = document_record.Transcription(
+        sha256=doc_hash, page_count=total, pages_processed=[i + 1 for i in indices],
+        pages_failed=[i + 1 for i in sorted(errors)], tables_with_line_breaks_fixed=tables_fixed,
+        latex_symbols_unwrapped=unwrapped, script_repair=script_info, restructuring_failed=restructuring_failed,
+        csv_tables=csv_info, elapsed_seconds=time.time() - t_start, pages=[pages[i] for i in sorted(pages)])
+    json_path = document_record.write(document.path, out_dir, run_fingerprint(args),
+                                      engine_info(args, device, engine.ready), tally, transcription)
     if hint := memory_hint(args, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
