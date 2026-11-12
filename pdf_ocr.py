@@ -3,6 +3,8 @@
 
     python pdf_ocr.py input.pdf                   # -> output/<stem>/<stem>.md, <stem>.json, imgs/, csv/
     python pdf_ocr.py input.pdf -o out --pages 1-5,9
+    python pdf_ocr.py scans/                      # every PDF under scans/ -> output/scans/<sub>/<name>/ (one model load)
+    python pdf_ocr.py scans/                      # again: the Documents already done are skipped (--force redoes them)
     python pdf_ocr.py input.pdf --reader minicpm  # MiniCPM-OCR-1.0 (in the torch worker) instead of PaddleOCR-VL-1.6
     python pdf_ocr.py input.pdf --judge           # score every Reading with the Judge, re-read the low ones
 
@@ -26,10 +28,12 @@ import sys
 import tempfile
 import time
 import warnings
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from pathlib import Path
 
 import block_reader
+import reader_bridge
 from minicpm_reader import unwrap_symbols
 from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
 
@@ -68,13 +72,17 @@ def _parser() -> argparse.ArgumentParser:
         prog="pdf_ocr",
         description="Transcribe a PDF to Markdown + JSON with PaddleOCR-VL-1.6 or MiniCPM-OCR-1.0 (local models).",
     )
-    p.add_argument("pdf", type=Path, help="input PDF")
-    p.add_argument("-o", "--output-dir", type=Path, help="output directory (default: output/<pdf stem>)")
+    p.add_argument("pdf", type=Path, metavar="PDF_OR_FOLDER",
+                   help="input PDF, or a folder: every PDF under it (any depth; names starting with '.' are "
+                        "skipped, symlinked folders are not entered) is transcribed in one Run")
+    p.add_argument("-o", "--output-dir", type=Path,
+                   help="output directory (default: output/<pdf stem>; for a folder, output/<folder name>, with "
+                        "one subfolder per Document mirroring its place in the folder)")
     p.add_argument("--models-dir", type=Path, default=ROOT / "models",
                    help=f"folder holding {LAYOUT_MODEL_DIR}/ and the Reader's folder: {VL_MODEL_DIR}/, or "
                         f"{MINICPM_MODEL_DIR}/ with --reader minicpm, plus {JUDGE_MODEL_DIR}/ with --judge "
                         "(default: ./models)")
-    p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all)")
+    p.add_argument("--pages", help="1-based pages to process, e.g. '1-3,7,10-' (default: all; not with a folder)")
     p.add_argument("--device", help="paddle device, e.g. gpu:0 or cpu (default: gpu:0 if available)")
 
     g = p.add_argument_group("accuracy")
@@ -127,6 +135,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="do not export tables as csv/pNNN_tableKK.csv (tables whose HTML is malformed "
                         "are never exported; the JSON lists them with the reason)")
     g.add_argument("--no-page-markers", action="store_true", help="omit <!-- page N --> markers in the Markdown")
+    p.add_argument("--force", action="store_true",
+                   help="with a folder: transcribe every Document again. Without it, a Document whose JSON shows it "
+                        "was already done (same PDF, no failed page, same settings and models) is skipped. "
+                        "Not with a single PDF, which is always transcribed")
     p.add_argument("-v", "--verbose", action="store_true", help="show PaddleOCR/PaddleX logs")
     return p
 
@@ -140,6 +152,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--judge-threshold only applies when the Judge is on; add --judge")
     if args.judge and args.judge_threshold is None:
         args.judge_threshold = DEFAULT_JUDGE_THRESHOLD
+    folder_run = args.pdf.is_dir()
+    if folder_run and args.pages is not None:
+        parser.error("--pages cannot be used with a folder: Documents differ in length")
+    if not folder_run and args.force:
+        parser.error("--force only applies to a folder: a single PDF is always transcribed again")
     return args
 
 
@@ -299,15 +316,27 @@ def start_worker(args):
         sys.exit(f"error: {e}")
 
 
+ENGINE_MODEL_KEYS = ("layout_model", "reader", "judge")
+
+
+def engine_models(args) -> dict:
+    """The model names of the JSON `engine` section (the Layout model, the Reader, the Judge when it is on), known
+    from the options alone. The "already done" check of a folder Run compares these. The worker's model folders
+    (worker/serve.py) are these same names; tests/test_options_only.py keeps the two apart from drifting."""
+    return {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader],
+            **({"judge": JUDGE_MODEL_DIR} if args.judge else {})}
+
+
 def engine_info(args, device: str, ready: dict | None) -> dict:
-    """The JSON `engine` section: the Layout model and the Reader, with the library versions."""
-    engine = {"layout_model": LAYOUT_MODEL_DIR, "reader": READER_MODEL_DIRS[args.reader]}
+    """The JSON `engine` section: the Layout model, the Reader and the Judge, with the library versions."""
+    models = engine_models(args)
+    engine = {"layout_model": models["layout_model"], "reader": models["reader"]}
     if args.reader == "paddle":
         engine.update(pipeline="PaddleOCR-VL-1.6", vl_model=VL_MODEL_DIR)
     engine.update(paddleocr=importlib.metadata.version("paddleocr"), paddlex=importlib.metadata.version("paddlex"))
+    if "judge" in models:
+        engine["judge"] = models["judge"]
     if ready:
-        if ready.get("judge") and args.judge:
-            engine["judge"] = ready["judge"]
         engine.update(ready["versions"])
     engine["device"] = device
     return engine
@@ -357,12 +386,11 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(args, pipe, stack, ink, doc_hash: str):
+def attach_worker(args, pipe, stack, ink):
     """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
     VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
 
-    import reader_bridge
     from script_repair import ScriptRepair, StickyScriptRepair
 
     try:
@@ -387,7 +415,7 @@ def attach_worker(args, pipe, stack, ink, doc_hash: str):
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair, doc_hash=doc_hash,
+    common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair,
                   **({"judge_threshold": args.judge_threshold} if judge else {}))
     if paddle_model is not None:
         bridge = reader_bridge.PaddleBridge(
@@ -552,6 +580,9 @@ class InkReread:
 
     def set_page(self, renders: PageRenders) -> None:
         self.renders = renders
+
+    def reset(self) -> None:
+        self.renders = None
 
     def reread_with(self, bridge, args):
         def ink_reread(request, text):
@@ -768,16 +799,18 @@ def page_line(n: int, total: int, page_no: int, n_blocks: int, seconds: float, *
 def reread_schedule_info(supports) -> list[dict]:
     """The re-read schedule for the JSON `settings`, with whether the Reader of this run can do each round."""
     return [{"round": s.round, "decode": s.decode, "temperature": s.temperature, "scale": s.scale, "samples": s.samples,
-             **({} if supports is None else {"supported": bool(supports(s))})} for s in block_reader.SCHEDULE]
+             "supported": bool(supports(s))} for s in block_reader.SCHEDULE]
 
 
 def settings_info(args, bridge=None) -> dict:
-    """The JSON `settings` section."""
+    """The JSON `settings` section, known from the options alone: a re-read Round is `supported` when the Reader that
+    --reader names can do it (a live `bridge` answers with that same Reader's rule)."""
+    supports = reader_bridge.reader_supports(args.reader) if bridge is None else bridge.supports
     return {
         "reader": args.reader,
         "judge": args.judge,
         "judge_threshold": args.judge_threshold,
-        **({"reread_schedule": reread_schedule_info(bridge.supports if bridge else None),
+        **({"reread_schedule": reread_schedule_info(supports),
             "max_readings_per_block": block_reader.MAX_READINGS} if args.judge else {}),
         "dpi": args.dpi,
         "layout_threshold": args.layout_threshold,
@@ -789,6 +822,8 @@ def settings_info(args, bridge=None) -> dict:
         "reread_short_blocks": not args.judge and not args.no_recover,  # the ink-based re-read; never with the Judge
         "markdown_merge_tables": not args.no_merge_tables,
         "markdown_ignore_labels": list(args.md_ignore_labels),
+        "script": args.script,
+        "page_markers": not args.no_page_markers,
         "csv_export": not args.no_csv,
     }
 
@@ -984,18 +1019,152 @@ def export_csv_tables(restructured: list[tuple[int, object]], pages: dict, csv_d
     return {"exported": exported, "skipped": skipped}
 
 
-def transcribe(args) -> int:
-    import contextlib
+@dataclass(frozen=True)
+class PlannedDocument:
+    """One Document of a folder Run: the PDF as found under the folder (a symlink stays a symlink), its path relative
+    to the folder, and the folder its files go to. A Document is `done` when an earlier Run left output that this Run
+    would not change; if not, `reason` says why it has to be processed."""
+    path: Path
+    relative: Path
+    out_dir: Path
+    done: bool = False
+    reason: str = ""
 
-    with contextlib.ExitStack() as stack:  # releases the worker and its crop folder, however the run ends
-        return _transcribe(args, stack)
+    @property
+    def relative_posix(self) -> str:
+        return self.relative.as_posix()
 
 
-def _transcribe(args, stack) -> int:
+class PlanError(Exception):
+    """A folder Run that cannot start: it has no Documents, a folder cannot be read, or Documents would write over
+    each other."""
+
+
+def find_pdfs(folder: Path) -> list[Path]:
+    """The paths, relative to `folder`, of every Document under it, in order: a file whose name ends in .pdf in any
+    case. Names starting with "." are skipped at any depth. A symlinked file counts and a symlinked folder is not
+    entered, so a link cannot make the search endless or reach outside the tree."""
+    def unreadable(e: OSError):
+        raise PlanError(f"cannot read {e.filename}: {e.strerror}")
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        found += [Path(dirpath, f).relative_to(folder) for f in filenames
+                  if f.lower().endswith(".pdf") and not f.startswith(".")]
+    return sorted(found, key=lambda rel: rel.parts)
+
+
+def refuse_collisions(documents: list[PlannedDocument]) -> None:
+    """Raise a PlanError naming the Documents that would write over each other: two with one output folder, or one
+    whose output folder lies inside another's imgs/ or csv/."""
+    by_dir: dict[Path, list[PlannedDocument]] = {}
+    for d in documents:
+        by_dir.setdefault(d.out_dir, []).append(d)
+    problems = [f"{', '.join(d.relative_posix for d in same)} all write to {out_dir}"
+                for out_dir, same in by_dir.items() if len(same) > 1]
+    for d in documents:
+        for folder in (d.out_dir, *d.out_dir.parents):
+            if folder.name in ("imgs", "csv"):
+                problems += [f"{d.relative_posix} writes to {d.out_dir}, "
+                             f"inside the {folder.name}/ of {outer.relative_posix}"
+                             for outer in by_dir.get(folder.parent, [])]
+    if problems:
+        raise PlanError("the output folders of these Documents collide (nothing was written):\n  "
+                        + "\n  ".join(problems))
+
+
+def file_sha256(path: Path) -> str:
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str | None:
+    """None when the JSON an earlier Run left for `document` reads cleanly and shows it is done: the PDF is the same
+    (sha256), no page failed, and the `settings` and the Engine's model names (`ENGINE_MODEL_KEYS`) are those of this
+    Run. Otherwise the reason it has to be processed. A JSON that is missing, cut off or lacks a field is never an
+    error. Library versions and the device are not compared."""
+    json_path = document.out_dir / f"{document.path.stem}.json"
+    try:
+        existing = json.loads(json_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "no output yet"
+    except (OSError, ValueError) as e:
+        return f"its JSON cannot be read ({type(e).__name__})"
+    if not isinstance(existing, dict):
+        return "its JSON is not an object"
+    source, engine, written = existing.get("source"), existing.get("engine"), existing.get("settings")
+    if not (isinstance(source, dict) and isinstance(source.get("sha256"), str)
+            and isinstance(source.get("pages_failed"), list) and isinstance(engine, dict) and isinstance(written, dict)):
+        return "its JSON lacks source.sha256, source.pages_failed, engine or settings"
+    if source["pages_failed"]:
+        return f"page(s) {', '.join(map(str, source['pages_failed']))} failed last time"
+    if written != settings:
+        keys = sorted(k for k in written.keys() | settings.keys() if written.get(k) != settings.get(k))
+        return f"settings differ: {', '.join(keys)}"
+    if differing := [k for k in ENGINE_MODEL_KEYS if engine.get(k) != models.get(k)]:
+        return f"models differ: {', '.join(differing)}"
+    try:
+        if file_sha256(document.path) != source["sha256"]:
+            return "the PDF changed"
+    except OSError as e:
+        return f"cannot read the PDF ({e.strerror})"
+    return None
+
+
+def plan_run(folder: Path, output_root: Path | None, args) -> list[PlannedDocument]:
+    """Plan a folder Run without loading, opening or writing anything: the Documents under `folder` in order, each
+    with the folder it writes to and whether it is already done (never with --force). `output_root` is `-o`, or None
+    for output/<name of the resolved folder>. Raises PlanError for a folder without Documents and for colliding output
+    folders, those of Documents that are done included."""
+    root = output_root if output_root is not None else Path("output") / folder.resolve().name
+    documents = [PlannedDocument(folder / rel, rel, root / rel.parent / rel.stem) for rel in find_pdfs(folder)]
+    if not documents:
+        raise PlanError(f"no PDF found under {folder}")
+    refuse_collisions(documents)
+    if args.force:
+        return [replace(d, reason="--force") for d in documents]
+    settings, models = settings_info(args), engine_models(args)
+    reasons = [why_not_done(d, settings, models) for d in documents]
+    return [replace(d, done=reason is None, reason=reason or "") for d, reason in zip(documents, reasons)]
+
+
+class DocumentError(Exception):
+    """A Document that cannot be transcribed at all: it does not open, has no pages, or --pages does not fit it."""
+
+
+class Document:
+    """An input PDF, opened: its pdfium document, its page count and the page indices to transcribe."""
+
+    def __init__(self, path: Path, pdf, indices: list[int]):
+        self.path, self.pdf, self.indices, self.total = path, pdf, indices, len(pdf)
+
+    def close(self) -> None:
+        self.pdf.close()
+
+
+def open_document(path: Path, pages: str | None) -> Document:
     import pypdfium2 as pdfium
 
-    if not args.pdf.is_file():
-        sys.exit(f"error: no such file: {args.pdf}")
+    try:
+        pdf = pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as e:
+        raise DocumentError(f"cannot open {path}: {e}") from None
+    except FileNotFoundError:  # a symlink to nothing, in a folder Run
+        raise DocumentError(f"cannot open {path}: no such file") from None
+    except OSError as e:
+        raise DocumentError(f"cannot open {path}: {e.strerror}") from None
+    if len(pdf) == 0:
+        raise DocumentError(f"{path} has no pages")
+    try:
+        return Document(path, pdf, parse_pages(pages, len(pdf)))
+    except ValueError as e:
+        raise DocumentError(str(e)) from None
+
+
+def check_setup(args) -> None:
+    """Exit with an error unless the models, the worker environment and the Judge's renderer that the options need
+    are in place. Done once per Run, before anything is loaded."""
     if msg := missing_models_message(args):
         sys.exit(f"error: {msg}")
     if needs_worker(args) and (problem := worker_env_problem()):
@@ -1003,22 +1172,28 @@ def _transcribe(args, stack) -> int:
     if args.judge and (problems := judge_setup_problems()):
         sys.exit("error: --judge needs the Judge's renderer, which is not set up (or run without --judge):\n  - "
                  + "\n  - ".join(problems))
-    try:
-        pdf = pdfium.PdfDocument(str(args.pdf))
-    except pdfium.PdfiumError as e:
-        sys.exit(f"error: cannot open {args.pdf}: {e}")
-    total = len(pdf)
-    if total == 0:
-        sys.exit(f"error: {args.pdf} has no pages")
-    try:
-        indices = parse_pages(args.pages, total)
-    except ValueError as e:
-        sys.exit(f"error: {e}")
 
-    out_dir = args.output_dir or Path("output") / args.pdf.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-    doc_hash = hashlib.sha256(args.pdf.read_bytes()).hexdigest()  # also seeds the sampling of the re-reads
 
+class Engine:
+    """What a Run loads once and every Document of it shares: the Layout model and the Reader (`pipe`, with the
+    Reader hook installed), the `device`, and, when the options need the worker, its `ready` event and the `bridge`.
+    `load_started` is when the loading began. The worker is released when the Run's ExitStack closes."""
+
+    def __init__(self, pipe, device: str, bridge, ink: InkReread, ready: dict | None, load_started: float | None = None):
+        self.pipe, self.device, self.bridge, self.ink, self.ready = pipe, device, bridge, ink, ready
+        self.load_started = load_started
+
+    def begin_document(self, doc_hash: str) -> None:
+        """Start a Document: forget everything that belongs to the previous one. `doc_hash` seeds the sampling of
+        the re-read Rounds."""
+        if self.bridge is not None:
+            self.bridge.begin_document(doc_hash)  # Readings, Scores, Verdicts, counters, page, sticky script repair
+        self.ink.reset()
+
+
+def load_engine(args, stack) -> Engine:
+    """Load the models once per Run (after check_setup): the Layout model, the worker, and the bridge with the
+    Reader hook installed. The worker and the crop folder are released when `stack` closes."""
     device = pick_device(args.device)
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
@@ -1026,8 +1201,21 @@ def _transcribe(args, stack) -> int:
     bridge = ready = None
     ink = InkReread()
     if needs_worker(args):
-        bridge, ready = attach_worker(args, pipe, stack, ink, doc_hash)
+        bridge, ready = attach_worker(args, pipe, stack, ink)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
+    return Engine(pipe, device, bridge, ink, ready, t_start)
+
+
+def transcribe_document(engine: Engine, args, document: Document, out_dir: Path, started: float | None = None) -> dict:
+    """Transcribe one Document with a loaded Engine and write its Markdown, JSON and CSVs into `out_dir`.
+    Returns the pages that failed ({page index: error}). `elapsed_seconds` counts from `started`: the Document's own
+    start, or, for a single-PDF Run, the start of the model load."""
+    t_start = time.time() if started is None else started
+    pdf, indices, total = document.pdf, document.indices, document.total
+    out_dir.mkdir(parents=True, exist_ok=True)
+    doc_hash = file_sha256(document.path)  # also seeds the sampling of the re-reads
+    engine.begin_document(doc_hash)
+    pipe, bridge, ink, device = engine.pipe, engine.bridge, engine.ink, engine.device
 
     ok: list[tuple[int, object]] = []
     meta: dict[int, dict] = {}
@@ -1062,7 +1250,6 @@ def _transcribe(args, stack) -> int:
         finally:
             page.close()
 
-    stack.close()  # the worker is not needed any more; free its GPU memory before the post-processing
     outcomes = bridge.outcomes if bridge else {}
 
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
@@ -1092,18 +1279,18 @@ def _transcribe(args, stack) -> int:
         pages[idx] = {"page": idx + 1, "error": msg, "blocks": []}
         md_parts[idx] = f"<!-- page {idx + 1} failed: {msg} -->"
 
-    stem = args.pdf.stem
+    stem = document.path.stem
     md_path, json_path = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
     md_path.write_text("\n\n".join(md_parts[i] for i in sorted(md_parts)) + "\n", encoding="utf-8")
-    doc = {
+    record = {
         "source": {
-            "file": args.pdf.name,
+            "file": document.path.name,
             "sha256": doc_hash,
             "page_count": total,
             "pages_processed": [i + 1 for i in indices],
             "pages_failed": [i + 1 for i in sorted(errors)],
         },
-        "engine": engine_info(args, device, ready),
+        "engine": engine_info(args, device, engine.ready),
         "settings": settings_info(args, bridge),
         "postprocessing": {
             "tables_with_line_breaks_fixed": tables_fixed,
@@ -1117,12 +1304,85 @@ def _transcribe(args, stack) -> int:
         "elapsed_seconds": round(time.time() - t_start, 1),
         "pages": [pages[i] for i in sorted(pages)],
     }
-    json_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if hint := memory_hint(args, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""
     print(f"wrote {md_path} and {json_path}{n_csv} in {time.time() - t_start:.0f}s", file=sys.stderr)
+    return errors
+
+
+def transcribe(args) -> int:
+    """A Run on one PDF: load the Engine, then transcribe the Document."""
+    import contextlib
+
+    if not args.pdf.is_file():
+        sys.exit(f"error: no such file: {args.pdf}")
+    check_setup(args)
+    try:
+        document = open_document(args.pdf, args.pages)
+    except DocumentError as e:
+        sys.exit(f"error: {e}")
+    with contextlib.ExitStack() as stack:  # releases the worker and its crop folder when the Run ends, however it ends
+        stack.callback(document.close)
+        engine = load_engine(args, stack)
+        errors = transcribe_document(engine, args, document, args.output_dir or Path("output") / args.pdf.stem,
+                                     started=engine.load_started)
     return 1 if errors else 0
+
+
+def transcribe_folder(args) -> int:
+    """A Run on every Document under a folder: plan it, and if any Document is not already done, check the setup, load
+    the Engine once and transcribe those Documents one at a time. A Document that fails is reported and the Run goes
+    on. A Run with nothing left to do touches no model. Documents are numbered by their place in the whole Run."""
+    import contextlib
+    import traceback
+
+    try:
+        plan = plan_run(args.pdf, args.output_dir, args)
+    except PlanError as e:
+        sys.exit(f"error: {e}")
+    labels = [f"[{i}/{len(plan)}] {planned.relative_posix}" for i, planned in enumerate(plan, 1)]
+    todo = [(label, planned) for label, planned in zip(labels, plan) if not planned.done]
+    skipped = len(plan) - len(todo)
+    print(f"found {len(plan)} Documents in {args.pdf} ({skipped} already done)", file=sys.stderr)
+    for label, planned in zip(labels, plan):
+        if planned.done:
+            print(f"{label} skipped: already done", file=sys.stderr)
+    written, failed, partly_failed = 0, [], []  # partly_failed: written, but with failed pages
+
+    def fail(label: str, planned: PlannedDocument, reason: str) -> None:
+        print(f"{label} FAILED: {reason}", file=sys.stderr)
+        failed.append(f"{planned.relative_posix}: {reason}")
+
+    with contextlib.ExitStack() as stack:
+        if todo:
+            check_setup(args)
+            engine = load_engine(args, stack)
+        for label, planned in todo:
+            document = None
+            try:
+                document = open_document(planned.path, None)
+                print(f"{label} ({document.total} pages)", file=sys.stderr)
+                errors = transcribe_document(engine, args, document, planned.out_dir)
+            except DocumentError as e:  # the Run goes on; the next Run retries the Document, which has no JSON
+                fail(label, planned, str(e))
+            except Exception as e:
+                traceback.print_exc()
+                fail(label, planned, f"{type(e).__name__}: {e}")
+            else:
+                written += 1
+                if errors:
+                    pages = ", ".join(str(idx + 1) for idx in sorted(errors))
+                    partly_failed.append(f"{planned.relative_posix}: {'page' if len(errors) == 1 else 'pages'} "
+                                         f"{pages} failed (recorded in its JSON)")
+            finally:
+                if document is not None:
+                    document.close()
+    print(f"{len(plan)} Documents: {written} written, {skipped} skipped, {len(failed)} failed", file=sys.stderr)
+    for line in failed + partly_failed:
+        print(f"  {line}", file=sys.stderr)
+    return 1 if failed or partly_failed else 0
 
 
 def main(argv=None) -> int:
@@ -1132,7 +1392,7 @@ def main(argv=None) -> int:
     if not args.verbose:
         warnings.filterwarnings("ignore", message=".*ccache.*")
         warnings.filterwarnings("ignore", message=".*copy construct from a tensor.*")
-    return transcribe(args)
+    return transcribe_folder(args) if args.pdf.is_dir() else transcribe(args)
 
 
 if __name__ == "__main__":
