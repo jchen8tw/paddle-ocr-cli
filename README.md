@@ -971,9 +971,12 @@ message suggests turning the Judge off or choosing PaddleOCR-VL, which are alrea
 follows the rule below), and folder runs: which Documents a folder holds and where each one writes
 (`tests/test_folder_plan.py`), which of them are already done (`tests/test_folder_done.py`), the `settings` and the
 Engine's model names known from the options alone (`tests/test_options_only.py`), what is refused before any model
-loads, and the loop over the Documents with a fake Engine, skipping, an output root inside the folder and a worker
-crash included (`tests/test_cli_folder.py`). The fake Engine stands for `--reader minicpm --judge --judge-threshold
-0.98` (`ENGINE_ARGV` in `tests/fakes.py`), and a test keeps that constant and the Engine from drifting apart.
+loads, and the loop over the Documents with a faked model load, skipping, an output root inside the folder and a worker
+crash included (`tests/test_cli_folder.py`). Every one of those tests that runs a whole Document builds its Engine
+from an option list with `engine_for` in `tests/fakes.py`, the way a Run builds it, with only the PaddleX pipe and the
+worker faked; `tests/test_document_setups.py` runs a Document that way in each of the four Reader and Judge setups
+(PaddleOCR-VL alone, which is the default, PaddleOCR-VL with the Judge, MiniCPM-OCR alone, and MiniCPM-OCR with the
+Judge), the default setup's ink-based re-read of a short Block included.
 
 The tests marked `gpu` need `PDF_OCR_SAMPLE_PDF` (a PDF with a real text layer; except the reference-example
 test) and the models. A run with `--reader minicpm` or `--judge` also needs the worker environment, and a run

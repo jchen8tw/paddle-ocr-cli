@@ -6,7 +6,7 @@ page and Block, is the Score, verdict and flag. No GPU, no weights.
 import numpy as np
 import pytest
 
-from fakes import FakeClient
+from fakes import FakeClient, FakePaddle
 from reader_bridge import BlockQuery, MiniCPMBridge, PaddleBridge
 from script_repair import ScriptRepair, StickyScriptRepair
 from worker_client import WorkerError
@@ -122,23 +122,6 @@ def test_the_page_summary_counts_flagged_blocks_and_those_not_scored(tmp_path):
 
 
 # --- --reader paddle: PaddleOCR-VL reads, the worker only judges ---------------------------------------
-
-class FakePaddle:
-    def __init__(self, texts):
-        self.texts, self.calls = texts, []
-        self.events = None
-
-    def predict(self, inputs, **kw):
-        inputs = list(inputs)
-        self.calls.append(([(str(i["query"]), i["image"].shape) for i in inputs], kw))
-        if self.events is not None:
-            self.events.append("paddle")
-        for i in inputs:
-            yield {"result": self.texts[str(i["query"])]}
-
-    def close(self):
-        pass
-
 
 def paddle(client, tmp_path, texts, **kw):
     kw.setdefault("to_html", lambda s: "<table><tr><td>a\\nb</td></tr></table>" if "<fcel>" in s else "")
