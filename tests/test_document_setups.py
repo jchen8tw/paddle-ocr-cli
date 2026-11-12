@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 import pdf_ocr
-from fakes import INK_BOX, SETUPS, FakeClient, blank_pdf, engine_for, inked_pdf
+from fakes import INK_BOX, SETUPS, FakeClient, blank_pdf, engine_for, inked_pdf, without_opencc
 from worker_client import WorkerError
 
 every_setup = pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
@@ -125,6 +125,15 @@ def test_with_the_script_repair_off_the_judge_scores_the_text_as_read(tmp_path, 
     done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     _, second = done.blocks
     assert (second["score"], second["flagged"], second["content"]) == (0.2, True, SIMPLIFIED)
+
+
+@unjudged_setups
+def test_without_opencc_a_document_is_never_written_with_its_script_unrepaired(tmp_path, capsys, monkeypatch, setup):
+    engine, _ = engine_for(setup.options, tmp_path / "engine")
+    without_opencc(monkeypatch)
+    with pytest.raises(ImportError):
+        transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert not (tmp_path / "out" / "doc.json").exists()
 
 
 # --- the ink-based Re-read of a Block whose text is implausibly short for the ink it covers ---------------------------

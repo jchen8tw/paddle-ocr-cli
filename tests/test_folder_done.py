@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import pdf_ocr
-from fakes import SETUPS, blank_pdf, engine_for
+from fakes import REPAIR_SKIPPED_BY_AN_OLD_RUN, SETUPS, blank_pdf, engine_for
 
 JUDGE_ON = ["--reader", "minicpm", "--judge", "--judge-threshold", "0.98"]  # the Run these tests start from
 JUDGE_OFF = ["--reader", "minicpm", "--no-judge"]  # the same Reader without the Judge: a threshold would be a usage error
@@ -93,6 +93,14 @@ def test_a_json_that_covers_only_some_of_the_pages_is_not_done_and_its_reason_na
     edit(json_of(out), lambda doc: doc["source"].update(pages_processed=[1, 3]))
     plan_ = plan(folder, out)
     assert not plan_["a.pdf"].done and "1, 3 of 3" in plan_["a.pdf"].reason
+    assert plan_["sub/b.pdf"].done
+
+
+def test_a_json_that_records_a_skipped_script_repair_is_not_done(tmp_path):
+    folder, out = written(tmp_path)
+    edit(json_of(out), lambda doc: doc["postprocessing"].update(script_repair=REPAIR_SKIPPED_BY_AN_OLD_RUN))
+    plan_ = plan(folder, out)
+    assert not plan_["a.pdf"].done and "repair" in plan_["a.pdf"].reason
     assert plan_["sub/b.pdf"].done
 
 
@@ -205,6 +213,9 @@ def test_a_folder_where_the_json_should_be_is_not_done_and_never_an_error(tmp_pa
     lambda doc: doc["source"].update(sha256=None),
     lambda doc: doc["source"].update(page_count="1"),
     lambda doc: doc["source"].update(pages_processed=None),
+    lambda doc: doc.pop("postprocessing"),
+    lambda doc: doc["postprocessing"].pop("script_repair"),
+    lambda doc: doc["postprocessing"].update(script_repair="auto"),
 ])
 def test_a_json_missing_a_field_is_not_done_and_never_an_error(tmp_path, remove):
     folder, out = written(tmp_path)

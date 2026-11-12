@@ -8,7 +8,7 @@ import time
 import pytest
 
 import pdf_ocr
-from fakes import FakeClient, blank_pdf, engine_for
+from fakes import REPAIR_SKIPPED_BY_AN_OLD_RUN, FakeClient, blank_pdf, empty_models_dir, engine_for, without_opencc
 
 
 def run_refused(argv, capsys):
@@ -71,10 +71,11 @@ class Loaded:
     """Replaces the setup checks and the model load of a Run: counts them and hands out an Engine built from the Run's own
     options. `client` is the worker of the Runs that start one (--reader minicpm or --judge)."""
 
-    def __init__(self, monkeypatch, tmp_path):
+    def __init__(self, monkeypatch, tmp_path, *, real_setup_checks=False):
         self.tmp_path, self.client = tmp_path / "engine", FakeClient(default_score=0.5)
         self.checks = self.loads = 0
-        monkeypatch.setattr(pdf_ocr, "check_setup", self.check_setup)
+        if not real_setup_checks:
+            monkeypatch.setattr(pdf_ocr, "check_setup", self.check_setup)
         monkeypatch.setattr(pdf_ocr, "load_engine", self.load_engine)
 
     def check_setup(self, args):
@@ -290,6 +291,39 @@ def test_changing_an_option_that_shapes_the_output_redoes_the_documents(tmp_path
     assert pdf_ocr.main([*argv, "--no-page-markers"]) == 0
     assert "1 Documents: 1 written, 0 skipped, 0 failed" in capsys.readouterr().err
     assert "<!-- page 1 -->" not in (tmp_path / "out" / "a" / "a.md").read_text(encoding="utf-8")
+
+
+# --- --script auto needs opencc: a Run without it stops at the setup checks ------------------------------------------
+
+def test_without_opencc_a_run_with_script_auto_stops_at_the_setup_checks_and_one_with_script_off_runs(
+        tmp_path, capsys, monkeypatch):
+    loaded = Loaded(monkeypatch, tmp_path, real_setup_checks=True)
+    without_opencc(monkeypatch)
+    out = tmp_path / "out"
+    argv = [str(blank_pdf(tmp_path / "a.pdf")), "-o", str(out), "--models-dir", str(empty_models_dir(tmp_path))]
+    code, err = run_refused(argv, capsys)
+    assert code.startswith("error: ") and "opencc" in code and "uv sync" in code and "--script off" in code
+    assert err == "" and loaded.loads == 0 and not out.exists()
+    assert pdf_ocr.main([*argv, "--script", "off"]) == 0
+    assert read_json(out / "a.json")["settings"]["script"] == "off"
+
+
+def test_a_folder_run_without_opencc_stops_at_the_setup_checks_instead_of_redoing_a_document_left_unrepaired(
+        tmp_path, capsys, monkeypatch):
+    loaded = Loaded(monkeypatch, tmp_path, real_setup_checks=True)
+    folder, out = folder_of(tmp_path, "a.pdf"), tmp_path / "out"
+    argv = [str(folder), "-o", str(out), "--models-dir", str(empty_models_dir(tmp_path))]
+    assert pdf_ocr.main(argv) == 0
+    doc = read_json(out / "a" / "a.json")
+    doc["postprocessing"]["script_repair"] = REPAIR_SKIPPED_BY_AN_OLD_RUN
+    (out / "a" / "a.json").write_text(json.dumps(doc), encoding="utf-8")
+    before = snapshot(out)
+    without_opencc(monkeypatch)
+    capsys.readouterr()
+    code, err = run_refused(argv, capsys)
+    assert code.startswith("error: ") and "opencc" in code
+    assert err == f"found 1 Documents in {folder} (0 already done)\n"
+    assert snapshot(out) == before and loaded.loads == 1
 
 
 # --- a worker crash fails the page it was on, and the Run goes on with a fresh worker ---------------------------------

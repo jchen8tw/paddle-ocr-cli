@@ -195,13 +195,7 @@ def repair_script(results: list[tuple[int, object]], mode: str) -> tuple[dict, d
     raw: dict = {}
     if mode == "off":
         return info, raw
-    try:
-        rep = ScriptRepair()
-    except ImportError:
-        print("note: opencc not installed, skipping Simplified->Traditional repair "
-              "(uv add opencc-python-reimplemented)", file=sys.stderr)
-        info["skipped"] = "opencc not installed"
-        return info, raw
+    rep = ScriptRepair()
 
     blocks = [(idx, i, b) for idx, r in results for i, b in enumerate(r["parsing_res_list"])
               if b.label not in NO_REPAIR_LABELS]
@@ -402,12 +396,7 @@ def attach_worker(args, pipe, stack, ink):
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
     judge = args.judge
-    repair = None
-    if judge and args.script == "auto":
-        try:
-            repair = StickyScriptRepair(ScriptRepair())
-        except ImportError:
-            pass  # repair_script prints the note once; the Judge then judges the text as read
+    repair = StickyScriptRepair(ScriptRepair()) if judge and args.script == "auto" else None
     paddle_model = reader_bridge.original_vl_model(pipe) if args.reader == "paddle" else None
     if paddle_model is not None:
         free_paddle_cache()  # the pipeline's construction left several GB cached; the Judge needs the room
@@ -1090,10 +1079,11 @@ def file_sha256(path: Path) -> str:
 
 def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str | None:
     """None when the JSON an earlier Run left for `document` reads cleanly and shows it is Already done: the PDF is the
-    same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, and the `settings` and the
-    Engine's model names (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it has to be processed. A
-    JSON that is missing, cut off or lacks a field is never an error. Library versions and the device are not
-    compared."""
+    same (sha256), every page from 1 to `source.page_count` was transcribed and none failed, the script repair was not
+    skipped (`postprocessing.script_repair.skipped`), and the `settings` and the Engine's model names
+    (`ENGINE_MODEL_KEYS`) are those of this Run. Otherwise the reason it
+    has to be processed. A JSON that is missing, cut off or lacks a field is never an error. Library versions and the
+    device are not compared."""
     json_path = document.out_dir / f"{document.path.stem}.json"
     try:
         existing = json.loads(json_path.read_text(encoding="utf-8"))
@@ -1104,16 +1094,21 @@ def why_not_done(document: PlannedDocument, settings: dict, models: dict) -> str
     if not isinstance(existing, dict):
         return "its JSON is not an object"
     source, engine, written = existing.get("source"), existing.get("engine"), existing.get("settings")
+    postprocessing = existing.get("postprocessing")
+    repair = postprocessing.get("script_repair") if isinstance(postprocessing, dict) else None
     if not (isinstance(source, dict) and isinstance(source.get("sha256"), str)
             and isinstance(source.get("page_count"), int) and isinstance(source.get("pages_processed"), list)
-            and isinstance(source.get("pages_failed"), list) and isinstance(engine, dict) and isinstance(written, dict)):
-        return ("its JSON lacks source.sha256, source.page_count, source.pages_processed, source.pages_failed, engine "
-                "or settings")
+            and isinstance(source.get("pages_failed"), list) and isinstance(engine, dict) and isinstance(written, dict)
+            and isinstance(repair, dict)):
+        return ("its JSON lacks source.sha256, source.page_count, source.pages_processed, source.pages_failed, engine, "
+                "settings or postprocessing.script_repair")
     if source["pages_processed"] != list(range(1, source["page_count"] + 1)):
         return (f"only page(s) {', '.join(map(str, source['pages_processed']))} of {source['page_count']} were "
                 "transcribed")
     if source["pages_failed"]:
         return f"page(s) {', '.join(map(str, source['pages_failed']))} failed last time"
+    if "skipped" in repair:
+        return f"its script repair was skipped last time ({repair['skipped']})"
     if written != settings:
         keys = sorted(k for k in written.keys() | settings.keys() if written.get(k) != settings.get(k))
         return f"settings differ: {', '.join(keys)}"
@@ -1178,10 +1173,17 @@ def open_document(path: Path, pages: str | None) -> Document:
 
 
 def check_setup(args) -> None:
-    """Exit with an error unless the models, the worker environment and the Judge's renderer that the options need
-    are in place. Done once per Run, before anything is loaded."""
+    """Exit with an error unless the models, opencc, the worker environment and the Judge's renderer that the options
+    need are in place. Done once per Run, before anything is loaded."""
     if msg := missing_models_message(args):
         sys.exit(f"error: {msg}")
+    if args.script == "auto":
+        try:
+            importlib.import_module("opencc")
+        except ImportError:
+            sys.exit("error: --script auto (the default) repairs Simplified drift with opencc, which cannot be "
+                     "imported. Install it with:  uv sync   (or run with --script off, which keeps the raw model "
+                     "output)")
     if needs_worker(args) and (problem := worker_env_problem()):
         sys.exit(f"error: {problem}")
     if args.judge and (problems := judge_setup_problems()):

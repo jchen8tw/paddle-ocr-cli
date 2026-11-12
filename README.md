@@ -22,7 +22,8 @@ for the length of the run. It is still one command, and you never start the work
 
 You need Python 3.13 and [uv](https://docs.astral.sh/uv/). `pyproject.toml` pins `paddlepaddle-gpu` 3.3.1
 from the CUDA 13.0 Paddle index. It also pulls in `paddleocr[doc-parser]` and `opencc-python-reimplemented`,
-which the Simplified to Traditional repair needs.
+which the Simplified to Traditional repair needs. If opencc cannot be imported, a run with `--script auto` (the
+default) stops before anything loads and tells you to run `uv sync`. A run with `--script off` does not need opencc.
 
 ```bash
 uv sync                      # the main environment: the Layout model, PaddleOCR and PaddleOCR-VL (all a plain run needs)
@@ -161,7 +162,7 @@ Before any model loads, and with nothing written, the run stops with an error wh
 - two Documents would write to one output folder (`a.pdf` and `a.PDF` side by side);
 - a Document's output folder would lie inside another's `imgs/` or `csv/` (`a.pdf` and `a/csv/b.pdf`).
 
-The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, worker
+The error lists the Documents involved; rename them. The same checks that a single PDF gets (models, opencc, worker
 environment, the Judge's renderer) come next and also stop the run before the first Document.
 
 A PDF that cannot be opened, or has no pages, is reported, counted as failed and gets no JSON, and the run goes
@@ -198,6 +199,9 @@ stopped, and after you add PDFs to the folder only the new ones are processed. A
 - `source.pages_processed` lists every page from 1 to `source.page_count`: a Document that a single-PDF run
   transcribed with `--pages` for only some of its pages is transcribed again, in full.
 - `source.pages_failed` is empty: a Document with failed pages is tried again.
+- `postprocessing.script_repair` has no `skipped`. Older versions skipped the Simplified to Traditional repair when
+  opencc could not be imported, and recorded that only there. The next run redoes such a Document once opencc is
+  installed. While opencc is still missing, a run with `--script auto` stops at the setup check instead (see "Setup").
 - `settings` equals the `settings` this run would write. Any option that shapes the output (`--reader`, `--dpi`,
   `--judge`, `--judge-threshold`, `--script`, `--no-page-markers`, `--no-csv`, ...) therefore makes every
   Document count as not done; options that do not (`-v`, `--device`, `--models-dir`) change nothing. A folder
