@@ -35,7 +35,7 @@ import block_reader
 import document_record
 import reader_bridge
 from minicpm_reader import unwrap_symbols
-from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, is_traditional
+from script_repair import BIG5_LOOKALIKES, NO_REPAIR_LABELS, ScriptRepair, StickyScriptRepair, is_traditional
 
 ROOT = Path(__file__).resolve().parent
 LAYOUT_MODEL_DIR = "PP-DocLayoutV3"
@@ -447,12 +447,10 @@ def judge_setup_problems() -> list[str]:
     return render_env.setup_problems()
 
 
-def attach_worker(spec: EngineSpec, models_dir: Path, pipe, stack, ink):
-    """Start the torch worker and make it (MiniCPM) or the Judge-only bridge (--reader paddle) the pipeline's
-    VL model. Returns (bridge, worker ready event); the worker and the crop folder are released when `stack` closes."""
+def attach_worker(spec: EngineSpec, models_dir: Path, pipe, device: str, stack) -> WithTheWorker:
+    """Start the torch worker and load the Engine with it, its bridge made the pipeline's VL model with the Reader hook.
+    The worker and the crop folder are released when `stack` closes."""
     from paddlex.inference.pipelines.paddleocr_vl.uilts import convert_otsl_to_html
-
-    from script_repair import ScriptRepair, StickyScriptRepair
 
     try:
         reader_bridge.check_hook_support(pipe)
@@ -460,8 +458,6 @@ def attach_worker(spec: EngineSpec, models_dir: Path, pipe, stack, ink):
         sys.exit(f"error: {e} The hook is used by --reader minicpm and --judge; {WORKER_FREE}.")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pdf_ocr_"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
-    judge = spec.judge
-    repair = StickyScriptRepair(ScriptRepair()) if judge and spec.script == "auto" else None
     paddle_model = reader_bridge.original_vl_model(pipe) if spec.reader == "paddle" else None
     if paddle_model is not None:
         free_paddle_cache()  # the pipeline's construction left several GB cached; the Judge needs the room
@@ -471,18 +467,10 @@ def attach_worker(spec: EngineSpec, models_dir: Path, pipe, stack, ink):
     stack.callback(client.close)
     print(f"worker ready (torch {ready['versions'].get('torch')}, transformers "
           f"{ready['versions'].get('transformers')}): {time.time() - t0:.1f}s", file=sys.stderr)
-    common = dict(to_html=convert_otsl_to_html, judge=judge, repair=repair,
-                  **({"judge_threshold": spec.judge_threshold} if judge else {}))
-    if paddle_model is not None:
-        bridge = reader_bridge.PaddleBridge(
-            paddle_model, client, tmp_dir, before_read=client.park if judge else None,
-            after_read=free_paddle_cache, **common)
-    else:
-        bridge = reader_bridge.MiniCPMBridge(client, tmp_dir, **common)
-        if spec.ink_reread:
-            bridge.ink_reread = ink.reread_with(bridge, spec)
-    reader_bridge.install_reader_hook(pipe, bridge)
-    return bridge, ready
+    engine = WithTheWorker(spec, pipe, device, client, ready, tmp_dir, paddle_model=paddle_model,
+                           to_html=convert_otsl_to_html, after_read=free_paddle_cache)
+    reader_bridge.install_reader_hook(pipe, engine.bridge)
+    return engine
 
 
 def free_paddle_cache() -> None:
@@ -563,13 +551,15 @@ def ink_reread_block(crop, text: str, reread_at_scale) -> str | None:
     return best_text if best_text is not None and best_n > 1.5 * n else None
 
 
-def recover_short_blocks(pipe, page, res, img, scale: float, spec: EngineSpec, page_no: int) -> list[dict]:
+def recover_short_blocks(pipe, page, res, img, scale: float, spec: EngineSpec,
+                         page_no: int) -> list[tuple[tuple, block_reader.BlockResult]]:
     """The VLM occasionally emits a few characters for a whole paragraph. Re-read such blocks from
     differently scaled renders and keep the result only if it is clearly longer and plausible. When the re-read of a
     Block fails (the GPU ran out of memory, say) the Block keeps its first Reading and the page goes on, as in the
-    bridge (`page_no` is the page's number from 1, for the warning).
+    bridge (`page_no` is the page's number from 1, for the warning). Returns (box, note) for each Block it re-read; the
+    note keeps the text before the Re-read.
     (PaddleOCR-VL without --judge; with the worker the same re-read runs in the bridge, see InkReread.)"""
-    notes: list[dict] = []
+    rereads: list[tuple[tuple, block_reader.BlockResult]] = []
     renders = PageRenders(page, img, scale, spec.dpi)
     for b in res["parsing_res_list"]:
         if b.label not in TEXT_LABELS:
@@ -592,9 +582,9 @@ def recover_short_blocks(pipe, page, res, img, scale: float, spec: EngineSpec, p
                   f"keeping its first reading: {type(e).__name__}: {e}", file=sys.stderr)
             continue
         if better is not None:
-            notes.append({"bbox": list(bbox), "original": b.content})
+            rereads.append((bbox, block_reader.BlockResult(better, text_before_reread=b.content)))
             b.content = better
-    return notes
+    return rereads
 
 
 class PageRenders:
@@ -703,10 +693,8 @@ def contiguous_groups(results: list[tuple[int, object]]):
         yield group
 
 
-def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes: dict | None = None) -> dict:
-    d = res.json["res"]
-    outcomes = outcomes or {}
-    reread = {tuple(n["bbox"]): n["original"] for n in meta["recovered"]}
+def page_json(idx: int, page: ReadPage, raw: dict, ignored: list[str]) -> dict:
+    d = page.result.json["res"]
     blocks = []
     for b in d["parsing_res_list"]:
         block = {
@@ -720,12 +708,9 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes
         }
         if (idx, b["block_id"]) in raw:
             block["content_raw"] = raw[(idx, b["block_id"])]
-        bbox = tuple(int(v) for v in b["block_bbox"])
-        if bbox in reread:
-            block["content_before_reread"] = reread[bbox]
-        outcome = outcomes.get((idx, bbox))
-        if outcome is not None:
-            add_judge_fields(block, outcome)
+        note = page.notes.get(tuple(int(v) for v in b["block_bbox"]))
+        if note is not None:
+            add_judge_fields(block, note)
         blocks.append(block)
     detections = [
         {"label": x["label"], "score": round(float(x["score"]), 4), "bbox": x["coordinate"]}
@@ -735,21 +720,10 @@ def page_json(idx: int, res, meta: dict, raw: dict, ignored: list[str], outcomes
         "page": idx + 1,
         "width": d["width"],
         "height": d["height"],
-        "scale_px_per_pt": round(meta["scale"], 6),
+        "scale_px_per_pt": round(page.scale, 6),
         "blocks": blocks,
         "layout_detections": detections,
     }
-
-
-def blocks_without_outcome(idx: int, res, outcomes: dict) -> list[tuple[str, tuple]]:
-    """(label, box) of the Blocks of a page that should have been judged but have no outcome, which the outcomes
-    (keyed by page and box) cannot match to the page's Blocks. Expected to be empty."""
-    missing = []
-    for b in res["parsing_res_list"]:
-        bbox = tuple(int(v) for v in b.bbox)
-        if block_reader.judge_category(b.label) is not None and (idx, bbox) not in outcomes:
-            missing.append((b.label, bbox))
-    return missing
 
 
 def add_judge_fields(block: dict, outcome) -> None:
@@ -787,20 +761,6 @@ def reading_json(r) -> dict:
     if r.duplicates:
         d["duplicates"] = r.duplicates  # later Readings with this very text, not scored again
     return d
-
-
-def undo_sticky_repair(ok: list[tuple[int, object]], outcomes: dict) -> int:
-    """Put back the text the sticky repair changed while reading, so that repair_script (the document-level
-    pass) decides on the whole document alone and the output text stays what it was before the Judge existed.
-    A Block the pipeline changed after the bridge returned it is left alone."""
-    undone = 0
-    for idx, r in ok:
-        for b in r["parsing_res_list"]:
-            o = outcomes.get((idx, tuple(int(v) for v in b.bbox)))
-            if o is not None and o.text_before_repair is not None and b.content == o.text:
-                b.content = o.text_before_repair
-                undone += 1
-    return undone
 
 
 def judge_summary(outcomes: dict) -> dict:
@@ -1161,38 +1121,115 @@ def check_setup(spec: EngineSpec, models_dir: Path) -> None:
                  + "\n  - ".join(problems))
 
 
-class Engine:
-    """What a Run loads once and every Document of it shares: the `spec` it was loaded from, the Layout model and the
-    Reader (`pipe`, with the Reader hook installed), the `device`, and, when the spec needs the worker, its `ready`
-    event and the `bridge`. `load_started` is when the loading began. The worker is released when the Run's ExitStack
-    closes."""
+@dataclass(frozen=True)
+class ReadPage:
+    """What the Engine read on one page: its Blocks (`result`, the pipeline's result, which the Document's own clean-up
+    keeps editing), the render `scale`, a note for each Block that has something to say (`notes`, keyed by the Block's
+    box within the page), and the progress counts: how many Blocks the ink-based Re-read replaced (`reread`) and the
+    Judge's page summary (`summary`, None without the Judge)."""
+    result: object
+    scale: float
+    notes: dict[tuple, block_reader.BlockResult]
+    reread: int
+    summary: dict | None
 
-    def __init__(self, spec: EngineSpec, pipe, device: str, bridge, ink: InkReread, ready: dict | None,
-                 load_started: float | None = None):
-        self.spec, self.pipe, self.device, self.bridge, self.ink, self.ready = spec, pipe, device, bridge, ink, ready
-        self.load_started = load_started
+
+class PaddleOCRVLAlone:
+    """The Engine without the worker, the default (ADR-0003): the pipeline (`pipe`) reads every Block with PaddleOCR-VL,
+    then the ink-based Re-read of implausibly short Blocks reads them again through the pipeline. Its notes are the
+    Blocks that Re-read replaced. There is no `bridge` and no worker `ready` event. `load_started` is when the loading
+    began."""
+
+    bridge = ready = None
+
+    def __init__(self, spec: EngineSpec, pipe, device: str):
+        self.spec, self.pipe, self.device = spec, pipe, device
+        self.load_started: float | None = None
 
     def begin_document(self, doc_hash: str) -> None:
-        """Start a Document: forget everything that belongs to the previous one. `doc_hash` seeds the sampling of
-        the re-read Rounds."""
-        if self.bridge is not None:
-            self.bridge.begin_document(doc_hash)  # Readings, Scores, Verdicts, counters, page, sticky script repair
-        self.ink.reset()
+        """Start a Document. Nothing of the previous one stays in this Engine."""
+
+    def read_page(self, page, index: int) -> ReadPage:
+        """Render the PDF `page` (`index` is its index in the PDF, from 0) at the spec's dpi and read it. Raises when
+        the page cannot be read."""
+        img, scale = render_page(page, self.spec.dpi)
+        result = self.pipe.predict(img, max_new_tokens=self.spec.max_new_tokens, use_queues=False)[0]
+        rereads = (recover_short_blocks(self.pipe, page, result, img, scale, self.spec, index + 1)
+                   if self.spec.ink_reread else [])
+        return ReadPage(result, scale, dict(rereads), len(rereads), None)
+
+
+class WithTheWorker:
+    """The Engine with the worker: MiniCPM-OCR, the Judge, or both. Its `bridge` reads every Block through the worker
+    (`client`), or through PaddleOCR-VL's own model (`paddle_model`) with the Judge in the worker, and, for MiniCPM-OCR
+    without the Judge, runs the ink-based Re-read of short Blocks itself. The bridge reads only once the caller makes it
+    the pipeline's VL model with the Reader hook. Crops go to the folder `crops`. Its notes are the bridge's
+    BlockResults for the page. `ready` is the worker's ready event; `load_started` is when the loading began."""
+
+    def __init__(self, spec: EngineSpec, pipe, device: str, client, ready: dict, crops: Path, *, paddle_model=None,
+                 to_html, after_read=None):
+        self.spec, self.pipe, self.device, self.ready = spec, pipe, device, ready
+        self.load_started: float | None = None
+        self._ink = InkReread()
+        judge = spec.judge
+        repair = StickyScriptRepair(ScriptRepair()) if judge and spec.script == "auto" else None
+        common = dict(to_html=to_html, judge=judge, repair=repair,
+                      **({"judge_threshold": spec.judge_threshold} if judge else {}))
+        if spec.reader == "paddle":
+            self.bridge = reader_bridge.PaddleBridge(
+                paddle_model, client, crops, before_read=client.park if judge else None, after_read=after_read,
+                **common)
+        else:
+            self.bridge = reader_bridge.MiniCPMBridge(client, crops, **common)
+            if spec.ink_reread:
+                self.bridge.ink_reread = self._ink.reread_with(self.bridge, spec)
+
+    def begin_document(self, doc_hash: str) -> None:
+        """Start a Document: forget the previous one's Readings, Scores, Verdicts, counters and page, its sticky script
+        repair and the ink-based Re-read's page. `doc_hash` seeds the sampling of the re-read Rounds."""
+        self.bridge.begin_document(doc_hash)
+        self._ink.reset()
+
+    def read_page(self, page, index: int) -> ReadPage:
+        """Render the PDF `page` (`index` is its index in the PDF, from 0) at the spec's dpi and read it. Raises when
+        the page cannot be read. Warns of every judged Block that has no Score. Puts the Reader's text back in every
+        Block whose text is still the text the sticky script repair made for the Judge, so that the Document's own
+        script repair decides alone."""
+        img, scale = render_page(page, self.spec.dpi)
+        renders = PageRenders(page, img, scale, self.spec.dpi)
+        self.bridge.current_page, self.bridge.page_source = index, renders
+        self._ink.set_page(renders)
+        result = self.pipe.predict(img, max_new_tokens=self.spec.max_new_tokens, use_queues=False)[0]
+        notes = {box: o for (p, box), o in self.bridge.outcomes.items() if p == index}
+        for b in result["parsing_res_list"]:
+            box = tuple(int(v) for v in b.bbox)
+            note = notes.get(box)
+            if note is None and self.spec.judge and block_reader.judge_category(b.label) is not None:
+                print(f"warning: page {index + 1}: the {b.label} Block at {box} has no Score (it was not read by the "
+                      "Reader hook, or its box changed after reading)", file=sys.stderr)
+            elif note is not None and note.text_before_repair is not None and b.content == note.text:
+                b.content = note.text_before_repair
+        return ReadPage(result, scale, notes, sum(1 for o in notes.values() if o.text_before_reread is not None),
+                        self.bridge.page_summary(index) if self.spec.judge else None)
+
+
+Engine = PaddleOCRVLAlone | WithTheWorker
 
 
 def load_engine(spec: EngineSpec, args, stack) -> Engine:
-    """Load the models once per Run (after check_setup): the Layout model, the worker, and the bridge with the
-    Reader hook installed. The worker and the crop folder are released when `stack` closes."""
+    """Load the models once per Run (after check_setup): the Layout model, and the Engine adapter the spec names.
+    With the worker, the worker and the crop folder are released when `stack` closes."""
     device = pick_device(args.device)
     t_start = time.time()
     print(f"loading models from {args.models_dir} on {device} ...", file=sys.stderr)
     pipe = build_pipeline(spec, args, device)
-    bridge = ready = None
-    ink = InkReread()
-    if spec.needs_worker:
-        bridge, ready = attach_worker(spec, args.models_dir, pipe, stack, ink)
+    if spec.adapter is Adapter.WORKER:
+        engine = attach_worker(spec, args.models_dir, pipe, device, stack)
+    else:
+        engine = PaddleOCRVLAlone(spec, pipe, device)
     print(f"model load: {time.time() - t_start:.1f}s", file=sys.stderr)
-    return Engine(spec, pipe, device, bridge, ink, ready, t_start)
+    engine.load_started = t_start
+    return engine
 
 
 def transcribe_document(engine: Engine, args, document: Document, out_dir: Path, started: float | None = None) -> dict:
@@ -1204,49 +1241,31 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     doc_hash = document_record.sha256(document.path)
     engine.begin_document(doc_hash)
-    spec, pipe, bridge, ink, device = engine.spec, engine.pipe, engine.bridge, engine.ink, engine.device
+    spec, bridge = engine.spec, engine.bridge
 
-    ok: list[tuple[int, object]] = []
-    meta: dict[int, dict] = {}
+    read: dict[int, ReadPage] = {}
     errors: dict[int, str] = {}
     for n, idx in enumerate(indices, 1):
         t0 = time.time()
         page = pdf[idx]
         try:
-            img, scale = render_page(page, spec.dpi)
-            if bridge is not None:
-                bridge.current_page = idx
-                bridge.page_source = PageRenders(page, img, scale, spec.dpi)
-                ink.set_page(bridge.page_source)
-            res = pipe.predict(img, max_new_tokens=spec.max_new_tokens, use_queues=False)[0]
-            recovered = []
-            if spec.ink_reread and spec.adapter is Adapter.PADDLEOCR_VL_ALONE:
-                recovered = recover_short_blocks(pipe, page, res, img, scale, spec, idx + 1)
-            n_reread = len(recovered) + (sum(1 for (p, _), o in bridge.outcomes.items()
-                                             if p == idx and o.text_before_reread is not None) if bridge else 0)
-            if bridge is not None and spec.judge:
-                for label, bbox in blocks_without_outcome(idx, res, bridge.outcomes):
-                    print(f"warning: page {idx + 1}: the {label} Block at {bbox} has no Score (it was not read by the "
-                          "Reader hook, or its box changed after reading)", file=sys.stderr)
-            ok.append((idx, res))
-            meta[idx] = {"scale": scale, "recovered": recovered}
-            print(page_line(n, len(indices), idx + 1, len(res["parsing_res_list"]), time.time() - t0,
-                            summary=bridge.page_summary(idx) if bridge and spec.judge else None,
-                            recovered=n_reread), file=sys.stderr)
+            read[idx] = p = engine.read_page(page, idx)
+            print(page_line(n, len(indices), idx + 1, len(p.result["parsing_res_list"]), time.time() - t0,
+                            summary=p.summary, recovered=p.reread), file=sys.stderr)
         except Exception as e:  # keep going; the failure is recorded in the JSON and the exit code
             errors[idx] = f"{type(e).__name__}: {e}"
             print(f"[{n:>3}/{len(indices)}] page {idx + 1}: FAILED {errors[idx]}", file=sys.stderr)
         finally:
             page.close()
 
+    ok = [(idx, p.result) for idx, p in read.items()]
     outcomes = bridge.outcomes if bridge else {}
 
     # Block-level clean-up, then the JSON, which stays faithful to each page's own layout.
-    undo_sticky_repair(ok, outcomes)  # the document-level repair below decides alone, as it always did
     tables_fixed = fix_table_line_breaks(ok)
     unwrapped = unwrap_block_symbols(ok)
     script_info, raw = repair_script(ok, args.script)
-    pages = {idx: page_json(idx, r, meta[idx], raw, args.md_ignore_labels, outcomes) for idx, r in ok}
+    pages = {idx: page_json(idx, p, raw, args.md_ignore_labels) for idx, p in read.items()}
 
     # Cross-page restructuring is for the Markdown only: it moves the content of a table that
     # continues over a page break into one table and re-levels the headings.
@@ -1254,7 +1273,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
     restructuring_failed = None
     try:
         for group in contiguous_groups(ok):
-            out = pipe.restructure_pages(
+            out = engine.pipe.restructure_pages(
                 [r for _, r in group], merge_tables=not args.no_merge_tables, relevel_titles=True,
                 concatenate_pages=False,
             )
@@ -1283,7 +1302,7 @@ def transcribe_document(engine: Engine, args, document: Document, out_dir: Path,
         latex_symbols_unwrapped=unwrapped, script_repair=script_info, restructuring_failed=restructuring_failed,
         csv_tables=csv_info, elapsed_seconds=time.time() - t_start, pages=[pages[i] for i in sorted(pages)])
     json_path = document_record.write(document.path, out_dir, run_fingerprint(spec, args),
-                                      engine_info(spec, device, engine.ready), tally, transcription)
+                                      engine_info(spec, engine.device, engine.ready), tally, transcription)
     if hint := memory_hint(spec, errors, outcomes):
         print(hint, file=sys.stderr)
     n_csv = f", {len(csv_info['exported'])} CSV table(s)" if csv_info else ""

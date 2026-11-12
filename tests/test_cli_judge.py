@@ -127,26 +127,26 @@ def outcome(**kw):
     return BlockResult(**kw)
 
 
-def page(blocks, outcomes, raw=None, idx=0):
-    return pdf_ocr.page_json(idx, res_for(*blocks), {"scale": 3.0, "recovered": []}, raw or {}, [], outcomes)
+def page(blocks, notes):
+    return pdf_ocr.page_json(0, pdf_ocr.ReadPage(res_for(*blocks), 3.0, notes, 0, None), {}, [])
 
 
 def test_a_judged_block_carries_score_verdict_and_flag():
     o = outcome(judged=True, score=0.91, verdict="scored", flagged=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert (b["score"], b["verdict"], b["flagged"]) == (0.91, "scored", True)
 
 
 def test_a_block_the_judge_could_not_score_has_a_null_score_and_the_reason():
     o = outcome(judged=True, score=None, verdict="render_error", verdict_detail="render_failed", flagged=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["score"] is None and b["verdict"] == "render_error" and b["flagged"] is True
     assert b["verdict_detail"] == "render_failed"
 
 
 def test_charts_seals_and_figures_have_none_of_the_judge_fields():
     o = outcome(judged=False)
-    (b,) = page([block(block_label="chart")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_label="chart")], {(1, 2, 30, 40): o})["blocks"]
     assert not {"score", "verdict", "flagged", "verdict_detail"} & b.keys()
 
 
@@ -155,52 +155,30 @@ def test_without_outcomes_the_json_is_what_it_was_before_the_judge():
     assert set(b) == {"id", "order", "label", "content", "bbox", "polygon", "in_markdown"}
 
 
-def test_outcomes_are_matched_by_page_and_bbox_not_by_block_id():
+def test_notes_are_matched_by_box_not_by_block_id():
     o = outcome(judged=True, score=0.5, verdict="scored", flagged=True)
-    assert "score" in page([block(block_id=7)], {(3, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
-    assert "score" not in page([block(block_id=7)], {(2, (1, 2, 30, 40)): o}, idx=3)["blocks"][0]
+    assert "score" in page([block(block_id=7, block_bbox=[1.4, 2.6, 30.2, 40.9])], {(1, 2, 30, 40): o})["blocks"][0]
+    assert "score" not in page([block(block_id=7)], {(1, 2, 30, 41): o})["blocks"][0]
 
 
 def test_a_block_judged_before_the_document_was_known_to_be_traditional_is_marked():
     o = outcome(judged=True, score=0.9, verdict="scored", flagged=True, judged_before_script_decision=True)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["judged_before_script_decision"] is True
 
 
 def test_the_text_that_was_judged_is_recorded_when_it_differs_from_the_text_that_was_written():
     o = outcome(text="银行", judged=True, score=0.9, verdict="scored", flagged=True)
-    (b,) = page([block(block_content="銀行")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="銀行")], {(1, 2, 30, 40): o})["blocks"]
     assert b["judged_text"] == "银行"
-    (b,) = page([block(block_content="银行")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="银行")], {(1, 2, 30, 40): o})["blocks"]
     assert "judged_text" not in b
 
 
 def test_the_ink_reread_of_a_bridge_block_is_recorded_like_the_post_pass_one():
     o = outcome(text_before_reread="x")
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert b["content_before_reread"] == "x"
-
-
-# --- document-level repair after a sticky decision -------------------------------------------------------
-
-class Blk:
-    def __init__(self, label, bbox, content):
-        self.label, self.bbox, self.content = label, bbox, content
-
-
-def test_text_the_sticky_repair_changed_is_put_back_so_the_document_level_repair_decides_alone():
-    b1, b2 = Blk("text", (0, 0, 1, 1), "銀行"), Blk("text", (0, 2, 1, 3), "plain")
-    outcomes = {(0, (0, 0, 1, 1)): outcome(text="銀行", text_before_repair="银行", judged=True),
-                (0, (0, 2, 1, 3)): outcome(text="plain", judged=True)}
-    pdf_ocr.undo_sticky_repair([(0, {"parsing_res_list": [b1, b2]})], outcomes)
-    assert (b1.content, b2.content) == ("银行", "plain")
-
-
-def test_text_the_pipeline_changed_afterwards_is_left_alone():
-    b1 = Blk("text", (0, 0, 1, 1), "something else entirely")
-    outcomes = {(0, (0, 0, 1, 1)): outcome(text="銀行", text_before_repair="银行", judged=True)}
-    pdf_ocr.undo_sticky_repair([(0, {"parsing_res_list": [b1]})], outcomes)
-    assert b1.content == "something else entirely"
 
 
 # --- the summary, stderr and the postprocessing section ------------------------------------------------
@@ -249,7 +227,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
                 Reading("x", 2, "greedy", None, 1.25, "page_render", "render_error", None, "render_failed")]
     o = outcome(text="你號", judged=True, score=0.93, verdict="scored", flagged=True, readings=readings,
                 stop_reason="exhausted", skipped_rounds=[{"round": 2, "reason": "r"}])
-    (b,) = page([block(block_content="你號")], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block(block_content="你號")], {(1, 2, 30, 40): o})["blocks"]
     assert (b["content"], b["score"], b["stop_reason"]) == ("你號", 0.93, "exhausted")
     assert b["readings"] == [
         {"content": "你好", "score": 0.4, "verdict": "scored", "round": 1, "decode": "greedy", "temperature": None,
@@ -263,7 +241,7 @@ def test_a_re_read_block_lists_its_readings_how_each_was_made_and_why_the_re_rea
 
 def test_a_block_that_was_not_re_read_has_no_readings_stop_reason_or_skipped_rounds():
     o = outcome(judged=True, score=0.99, verdict="scored", flagged=False)
-    (b,) = page([block()], {(0, (1, 2, 30, 40)): o})["blocks"]
+    (b,) = page([block()], {(1, 2, 30, 40): o})["blocks"]
     assert not {"readings", "stop_reason", "stop_detail", "skipped_rounds"} & b.keys()
 
 
@@ -348,12 +326,3 @@ def test_no_message_suggests_a_flag_that_the_new_defaults_made_meaningless(monke
                   ((), ("--reader", "minicpm"), ("--judge",), ("--reader", "minicpm", "--judge")))]
     for msg in messages:
         assert "--no-judge" not in msg and "--reader paddle" not in msg, msg
-
-
-def test_judged_blocks_without_an_outcome_are_found_by_page_and_box():
-    block = lambda label, bbox: types.SimpleNamespace(label=label, bbox=bbox)  # noqa: E731
-    res = {"parsing_res_list": [block("text", [1, 2, 3, 4]), block("text", [5, 6, 7, 8]), block("chart", [9, 9, 9, 9]),
-                                block("table", [0.4, 0.6, 20.2, 30.9])]}
-    outcomes = {(2, (1, 2, 3, 4)): outcome(judged=True)}
-    assert pdf_ocr.blocks_without_outcome(2, res, outcomes) == [("text", (5, 6, 7, 8)), ("table", (0, 0, 20, 30))]
-    assert len(pdf_ocr.blocks_without_outcome(3, res, outcomes)) == 3  # another page's outcomes do not count

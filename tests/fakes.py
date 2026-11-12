@@ -8,8 +8,7 @@ from pathlib import Path
 import pypdfium2 as pdfium
 
 import pdf_ocr
-from reader_bridge import BlockQuery, MiniCPMBridge, PaddleBridge
-from script_repair import ScriptRepair, StickyScriptRepair
+from reader_bridge import BlockQuery
 from worker_client import WorkerError
 
 
@@ -96,10 +95,10 @@ class FakeResult:
 
 class FakePipe:
     """PaddleOCRVL with the Reader hook installed: finds the same Blocks on every page (`blocks`, as (label, box) in
-    render pixels) and has the bridge read them."""
+    render pixels) and has the `bridge` the hook installed read them."""
 
-    def __init__(self, bridge):
-        self.bridge, self.blocks = bridge, list(BLOCKS)
+    def __init__(self):
+        self.bridge, self.blocks = None, list(BLOCKS)
 
     def predict(self, img, max_new_tokens, use_queues):
         blocks = [FakeBlock(label, bbox) for label, bbox in self.blocks]
@@ -214,37 +213,31 @@ class Fakes:
 
 
 def engine_for(options, tmp_path, *, worker=None):
-    """A loaded Engine (what `load_engine` returns) for an option list (or the Engine spec of a Run), built the way a
-    Run builds it: `load_engine` and `attach_worker` in pdf_ocr.py, with the PaddleX pipe and the worker faked.
-    Returns the Engine and the `Fakes` that steer it. `worker` is the FakeClient to use, if the test made its own.
+    """A loaded Engine (what `load_engine` returns) for an option list (or the Engine spec of a Run): the adapter the
+    spec names, wired by the same constructor `load_engine` uses, with only the PaddleX pipe, the Reader hook and the
+    worker faked. Returns the Engine and the `Fakes` that steer it. `worker` is the FakeClient to use, if the test made
+    its own.
 
     It differs from a Run in three places: the bridge has no `after_read` (nothing to free in paddle's GPU cache),
     `to_html` converts nothing, and the Engine has the device "cpu" and no `load_started`."""
     spec = (options if isinstance(options, pdf_ocr.EngineSpec)
             else pdf_ocr.EngineSpec.from_options(pdf_ocr.parse_args(["in.pdf", *options])))
-    ink = pdf_ocr.InkReread()
     if spec.adapter is pdf_ocr.Adapter.PADDLEOCR_VL_ALONE:
         pipe = FakeVLPipe()
-        return pdf_ocr.Engine(spec, pipe, "cpu", None, ink, None), Fakes(pipe, None, None)
+        return pdf_ocr.PaddleOCRVLAlone(spec, pipe, "cpu"), Fakes(pipe, None, None)
     client = worker or FakeClient(default_score=0.5)  # every Reading scores below a high threshold: all re-read Rounds run
     crops = tmp_path / "crops"
     crops.mkdir(parents=True, exist_ok=True)
-    repair = StickyScriptRepair(ScriptRepair()) if spec.judge and spec.script == "auto" else None
-    common = dict(to_html=lambda s: "", judge=spec.judge, repair=repair,
-                  **({"judge_threshold": spec.judge_threshold} if spec.judge else {}))
     paddle = None
     if spec.reader == "paddle":
         paddle = FakePaddle({"OCR:": "text for OCR:"})
         paddle.events = client.events
-        bridge = PaddleBridge(paddle, client, crops, before_read=client.park if spec.judge else None, **common)
-    else:
-        bridge = MiniCPMBridge(client, crops, **common)
-        if spec.ink_reread:
-            bridge.ink_reread = ink.reread_with(bridge, spec)
     ready = {"event": "ready", "reader": pdf_ocr.MINICPM_MODEL_DIR if spec.reader == "minicpm" else None,
              "judge": pdf_ocr.JUDGE_MODEL_DIR if spec.judge else None, "versions": {"torch": "0.0"}}
-    pipe = FakePipe(bridge)
-    return pdf_ocr.Engine(spec, pipe, "cpu", bridge, ink, ready), Fakes(pipe, client, paddle)
+    pipe = FakePipe()
+    engine = pdf_ocr.WithTheWorker(spec, pipe, "cpu", client, ready, crops, paddle_model=paddle, to_html=lambda s: "")
+    pipe.bridge = engine.bridge
+    return engine, Fakes(pipe, client, paddle)
 
 
 def empty_models_dir(tmp_path):
