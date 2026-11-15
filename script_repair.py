@@ -21,7 +21,7 @@ class ScriptRepair:
     """
 
     def __init__(self):
-        from opencc import OpenCC  # optional dependency
+        from opencc import OpenCC
 
         def make(name):
             try:
@@ -91,10 +91,9 @@ class StickyScriptRepair:
     as soon as the rule holds, keeps it decided (sticky, never undone). The Reading that completes the
     evidence is itself repaired; Readings before that point are not (the caller records that they were
     judged unrepaired). Same Readings in the same order always give the same decisions.
-    `rep` is a ScriptRepair, or None when opencc is not installed (then nothing is ever repaired).
     """
 
-    def __init__(self, rep: "ScriptRepair | None"):
+    def __init__(self, rep: ScriptRepair):
         self.rep = rep
         self.reset()
 
@@ -108,7 +107,7 @@ class StickyScriptRepair:
 
         `survey=False` is for a re-read of a Block whose first Reading was already counted: the text is repaired
         if the document is decided, but the running survey is left alone (it is the document's, not the re-reads')."""
-        if self.rep is None or label in NO_REPAIR_LABELS:
+        if label in NO_REPAIR_LABELS:
             return text, self.is_traditional
         if survey and not self.is_traditional:
             simp, trad = self.rep.survey([text])

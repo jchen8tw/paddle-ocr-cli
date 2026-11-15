@@ -3,14 +3,7 @@ this order, with nothing loaded (no GPU, no models: a model folder is an empty d
 import pytest
 
 import pdf_ocr
-from fakes import blank_pdf
-
-
-def models_dir(tmp_path):
-    d = tmp_path / "models"
-    for name in ("PP-DocLayoutV3", "PaddleOCR-VL-1.6"):
-        (d / name).mkdir(parents=True)
-    return d
+from fakes import blank_pdf, empty_models_dir
 
 
 def run(argv, capsys):
@@ -34,7 +27,7 @@ def test_missing_models_are_reported_before_the_pdf_is_opened(tmp_path, capsys):
 def test_a_pdf_that_cannot_be_opened_stops_the_run_before_any_model_is_loaded(tmp_path, capsys):
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"not a pdf")
-    code, err = run([str(bad), "-o", str(tmp_path / "out"), "--models-dir", str(models_dir(tmp_path)),
+    code, err = run([str(bad), "-o", str(tmp_path / "out"), "--models-dir", str(empty_models_dir(tmp_path)),
                      "--reader", "paddle", "--no-judge"], capsys)
     assert code.startswith(f"error: cannot open {bad}:") and err == ""  # no "loading models ..." line
     assert not (tmp_path / "out").exists()
@@ -42,7 +35,7 @@ def test_a_pdf_that_cannot_be_opened_stops_the_run_before_any_model_is_loaded(tm
 
 def test_pages_outside_the_document_stop_the_run_before_any_model_is_loaded(tmp_path, capsys):
     pdf = blank_pdf(tmp_path / "one.pdf")
-    code, err = run([str(pdf), "-o", str(tmp_path / "out"), "--models-dir", str(models_dir(tmp_path)),
+    code, err = run([str(pdf), "-o", str(tmp_path / "out"), "--models-dir", str(empty_models_dir(tmp_path)),
                      "--reader", "paddle", "--no-judge", "--pages", "2"], capsys)
     assert code == "error: page range '2' outside 1..1" and err == ""
     assert not (tmp_path / "out").exists()

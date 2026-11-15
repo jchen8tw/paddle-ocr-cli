@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 import pdf_ocr
-from fakes import INK_BOX, SETUPS, FakeClient, blank_pdf, engine_for, inked_pdf
+from fakes import INK_BOX, SETUPS, FakeClient, blank_pdf, engine_for, inked_pdf, without_opencc
 from worker_client import WorkerError
 
 every_setup = pytest.mark.parametrize("setup", SETUPS, ids=lambda setup: setup.id)
@@ -76,6 +76,16 @@ def test_the_worker_and_the_judge_leave_their_marks_in_the_json_only_when_the_se
 
 
 @every_setup
+def test_a_json_whose_cross_page_restructuring_worked_has_the_postprocessing_keys_it_always_had(
+        tmp_path, capsys, setup):
+    engine, _ = engine_for(setup.options, tmp_path / "engine")
+    done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert list(done.json["postprocessing"]) == [
+        "tables_with_line_breaks_fixed", *(["repetition_cuts"] if setup.worker else []), "latex_symbols_unwrapped",
+        "script_repair", *(["judge"] if setup.judge else [])]
+
+
+@every_setup
 def test_the_progress_line_names_the_judge_only_when_the_setup_has_it(tmp_path, capsys, setup):
     engine, fakes = engine_for(setup.options, tmp_path / "engine")
     done = transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf", pages=2), tmp_path / "out", capsys)
@@ -125,6 +135,15 @@ def test_with_the_script_repair_off_the_judge_scores_the_text_as_read(tmp_path, 
     done = transcribe(engine, options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
     _, second = done.blocks
     assert (second["score"], second["flagged"], second["content"]) == (0.2, True, SIMPLIFIED)
+
+
+@unjudged_setups
+def test_without_opencc_a_document_is_never_written_with_its_script_unrepaired(tmp_path, capsys, monkeypatch, setup):
+    engine, _ = engine_for(setup.options, tmp_path / "engine")
+    without_opencc(monkeypatch)
+    with pytest.raises(ImportError):
+        transcribe(engine, setup.options, blank_pdf(tmp_path / "doc.pdf"), tmp_path / "out", capsys)
+    assert not (tmp_path / "out" / "doc.json").exists()
 
 
 # --- the ink-based Re-read of a Block whose text is implausibly short for the ink it covers ---------------------------
